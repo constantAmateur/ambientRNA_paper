@@ -3,22 +3,30 @@
 #* Preamble *#
 #************#
 ##############
+setwd('~/trueHome/Projects/SoupX')
 
-#################
-# Standard Init #
-#################
+#TODO
+#Need a convincingish biological example for tumour data.
+#Colour scheme for expression in 1B
+#Referencing
+#Details of how figures were made in methods
 
-#For reproducability
-set.seed(123)
-#NOTE: This is the essential part of my usual .Rprofile
-options(menu.graphics=FALSE)
-options(stringsAsFactors=FALSE)
-
+#Supplementary Figures:
+# Optimum number of UMIs for calculating BG - Done
+# Lobster for Drop-seq data - Done
+# Show that soup doesn't vary strongly between cells. - Drop
+# Showing correlation between effective contamination fraction and inferred one. - Done
+# Selection of contamination gene plot. - ?
+# Example showing that HB genes work well. - Done
 
 #############
 # Libraries #
 #############
 
+library(ggplot2)
+library(cowplot)
+library(reshape2)
+library(beeswarm)
 #library(cowplot)
 library(wesanderson)
 #library(reshape2)
@@ -32,22 +40,27 @@ library(Seurat)
 library(SoupX)
 #colSums = Matrix::colSums
 #rowSums = Matrix::rowSums
+library(Matrix)
+import('Code/plotParts.R',all=TRUE)
 
 ##########
 # Params #
 ##########
 
-#Working directory
-workDir = '~/trueHome/scratch/SoupX/'
 #Where to store the results
-plotDir='Output'
+plotDir='Results/Virgin'
 #Recalculate everything from scratch even if we have the data?
 forceRecalc=FALSE
 #Manifest with information about Kidney Samples
-fp_cMani = 'KidneyTumour/Table5.tsv'
-#Path for ideal experiment
-fp_idealHg = 'Mixture/hg19'
-fp_idealMm = 'Mixture/mm10'
+fp_cMani = 'Data/Tumour/Table5.tsv'
+#Path for species-mix experiment
+fp_idealHg = 'Data/Mixture/hg19'
+fp_idealMm = 'Data/Mixture/mm10'
+fp_mixDropSeq = 'Data/DropEstData/dropseq_thousand.rds'
+fp_mixInDropHg = 'Data/DropEstData/indrop_mixture_human.rds'
+fp_mixInDropMm = 'Data/DropEstData/indrop_mixture_mouse.rds'
+#The PBMC data
+fp_pbmc = 'Data/PBMC_4k'
 #Regex for soup specific genes
 rhoEstGenes = '^HB[BGMQDAZE][12]?_'
 #Define populations to use to estimate rho.
@@ -63,1111 +76,1955 @@ colPal = c('#CC3333','#6699CC',colPal[-(1:2)])
 colPalLarge = c('#e41a1c','#377eb8','#4daf4a','#984ea3','#ff7f00','#ffff33','#a65628','#f781bf','#999999')
 #Set3
 #colPalLarge = c('#8dd3c7','#ffffb3','#bebada','#fb8072','#80b1d3','#fdb462','#b3de69','#fccde5','#d9d9d9')
+#Manual
+colPalLarge = c('#1b9e77','#d95f02','#7570b3','#e7298a','#66a61e','#e6ab02','#a6761d','#666666')
+#Diverging colour palette
+divColPal = rev(c('#8c510a','#d8b365','#f6e8c3','#f5f5f5','#c7eae5','#5ab4ac','#01665e'))
+divColPal = rev(c('#d73027','#f46d43','#fdae61','#fee090','#ffffbf','#e0f3f8','#abd9e9','#74add1','#4575b4'))
 rasterRes = 300
+#Cut-off for when a cluster is considered to map to its cleaned partner 1-1
+matchFrac = 0.8
+#How many cores to use
+nCores = 16
+
+#############
+# Functions #
+#############
+#' Run standard analysis
+standard10X = function(dat,nPCs=50,res=1.0){
+  srat = CreateSeuratObject(dat)
+  srat = NormalizeData(srat)
+  srat = ScaleData(srat)
+  srat = FindVariableFeatures(srat)
+  srat = RunPCA(srat)
+  srat = RunUMAP(srat,dims=seq(nPCs))
+  srat = RunTSNE(srat,dims=seq(nPCs))
+  srat = FindNeighbors(srat,dims=seq(nPCs))
+  srat = FindClusters(srat,res=res)
+  return(srat)
+}
+#' Normal plots
+#'
+#' The idea being that this will save a pdf and png version.  If splitRaster is set to TRUE, it will also save a two-part figure where part of the plot is rasterised and saved as a png and the other bits are saved as a pdf.
+#' All this works by assuming that the doPlot function takes one parameter that can be 'All', 'Text', or 'Raster'
+makePlots = function(baseNom,doPlot,splitRaster=FALSE,...){
+  #Normal plots
+  pdf(paste0(baseNom,'.pdf'),...,useDingbats=FALSE)
+    doPlot()
+  dev.off()
+  png(paste0(baseNom,'.png'),...,res=rasterRes,units='in')
+    doPlot()
+  dev.off()
+  #Split raster and text
+  if(splitRaster){
+    pdf(paste0(baseNom,'_nonRaster.pdf'),...,useDingbats=FALSE)
+      doPlot('Text')
+    dev.off()
+    png(paste0(baseNom,'_raster.png'),...,res=rasterRes,units='in')
+      doPlot('Raster')
+    dev.off()
+  }
+}
+
+
+#############
+# Schematic #
+#############
+#Use PBMC data
+scPBMC = load10X(fp_pbmc)
+##########################
+# Soup profile estimation
+#Elbow plot
+x = scPBMC$nDropUMI
+o = order(-x)
+x = x[o]
+pdf(file.path('Results','Schematic_fitBG1.pdf'))
+  plot(seq_along(x),x,
+       log='xy',
+       type='l',
+       frame.plot=FALSE,
+       ylab='nUMIs',
+       xlab='Droplets')
+  lims = range(which(x<10))
+  polygon(c(lims[1],lims[1],lims[2],lims[2]),
+          c(1,max(x),max(x),1),
+          col='#11111133')
+  text(lims[1]/2,mean(x),labels=sprintf('%d droplets with %d counts',sum(x<10),sum(x[x<10])))
+dev.off()
+#Background barplot
+x = scPBMC$soupProfile
+x = x[order(-x$est),]
+#Top and bottom 5
+xx = x[c(1:5,tail(which(x$est>0),5)),]
+#Percentage, one sig-fig
+xx$perc = sprintf('%.01g',xx$est*100)
+pdf(file.path('Results','Schematic_fitBG2.pdf'))
+  y = barplot(xx$est,names.arg=rownames(xx),las=2)
+  text(y[,1],max(xx$est)*1.1,xx$perc,xpd=TRUE,srt=90)
+dev.off()
+###########################
+# Estimating contamination
+scPBMC$metaData = cbind(scPBMC$metaData,PBMC_DR[rownames(scPBMC$metaData),])
+colnames(scPBMC$metaData) = gsub('Cluster','cluster',colnames(scPBMC$metaData))
+igGenes = c('IGHA1','IGHA2','IGHG1','IGHG2','IGHG3','IGHG4','IGHD','IGHE','IGHM',
+            'IGLC1','IGLC2','IGLC3','IGLC4','IGLC5','IGLC6','IGLC7',
+            'IGKC')
+useToEst = estimateNonExpressingCells(scPBMC,list(IG=igGenes),setNames(PBMC_DR$Cluster,rownames(PBMC_DR)))
+gg = plotMarkerMap(scPBMC,igGenes,PBMC_DR,useToEst=useToEst)
+x = plotMarkerMap(scPBMC,igGenes,PBMC_DR)$data
+labs = x[x$qVals<0.05,]
+labs = labs[match(unique(labs$Cluster),labs$Cluster),]
+mids = aggregate(cbind(RD1,RD2) ~ Cluster,data=x,FUN=mean)
+gg1 = ggplot(x,aes(RD1,RD2,colour=qVals<0.05)) +
+  #Plot the non-sig ones first
+  geom_point(data=x[x$qVals>=0.05,],size=0.5) +
+  geom_point(data=x[x$qVals<0.05,],size=0.5) +
+  #Label cluster mids
+  geom_label(data=mids,inherit.aes=FALSE,aes(RD1,RD2,label=paste0('Clust',Cluster))) +
+  #Label one of the bad ones randomly
+  geom_label(data=labs,aes(label=Cluster),alpha=0.4)+
+  geom_density2d(inherit.aes=FALSE,aes(RD1,RD2,group=Cluster),colour='black') +
+  scale_colour_manual(values=c(`FALSE`='#888888',`TRUE`='#cc0000')) +
+  guides(colour=FALSE) +
+  theme_void()
+pdf(file.path('Results','Schematic_rho1.pdf'),useDingbats=FALSE)
+  plot(gg1)
+dev.off()
+tmp = c('#ffffcc','#ffeda0','#fed976','#feb24c','#fd8d3c','#fc4e2a','#e31a1c','#bd0026','#800026')
+tmp = c('#ffffff','#f0f0f0','#d9d9d9','#bdbdbd','#969696','#737373','#525252','#252525','#000000')
+tmp = c('#f7f7f7','#cccccc','#969696','#525252')
+x$igGenes = colSums(scPBMC$toc[igGenes,])[rownames(x)]
+x$useToEst = useToEst[rownames(x),1]
+x[!useToEst[,1],'igGenes'] = 0
+doPlot = function(e){
+  plot(x$RD1[x$useToEst],x$RD2[x$useToEst],
+       type='n',
+       frame.plot=FALSE,
+       xlab='',
+       ylab='',
+       axes=FALSE)
+  points(x$RD1[x$useToEst],x$RD2[x$useToEst],
+         pch=19,
+         #col='black',
+         col=colAlpha(tmp[x$igGenes[x$useToEst]+1],1.0))
+}
+gg2 = ggplot(x,aes(RD1,RD2,colour=as.character(igGenes))) + 
+  geom_point(data=x[!x$useToEst,],colour='grey',alpha=0.5) +
+  geom_point(data=x[x$useToEst,]) +
+  ggtitle(sprintf('%d IG counts, %g expected soup',
+                  sum(scPBMC$toc[igGenes,useToEst[,1]]),
+                  sum(scPBMC$toc[,useToEst[,1]])*sum(scPBMC$soupProfile[igGenes,'est'])
+                  )) +
+  scale_colour_manual(values=tmp[seq(7)]) +
+  guides(colour=FALSE) +
+  theme_void()
+pdf(file.path('Results','Schematic_rho2.pdf'),useDingbats=FALSE)
+  #plot(gg2)
+  doPlot()
+dev.off()
+####################
+# Correcting counts
+scPBMC = calculateContaminationFraction(scPBMC,useToEst=useToEst,nonExpressedGeneList=list(IG=igGenes))
+out = adjustCounts(scPBMC,setNames(PBMC_DR$Cluster,rownames(PBMC_DR)),verbose=2,nCores=nCores)
+#Now get the genes to display and total for cluster 6
+toDisp = c('LYZ','IGKC','S100A8','S100A9','CD74')
+tgtClust = '6'
+x = rowSums((scPBMC$toc-out)[,scPBMC$metaData$cluster==tgtClust])
+#Round to integers and fake y-distribution
+cnts = round(x[toDisp])
+#Add one for total
+cnts = c(cnts,round(1000))
+df = data.frame(gene = rep(seq_along(c(toDisp,'Total')),cnts)+rnorm(sum(cnts),sd=0.15),
+                yDist = 0.5+rnorm(sum(cnts),sd=0.15))
+df$gene = as.character(df$gene)
+pdf(file.path(plotDir,'Schematic_adjust1.pdf'),height=4)
+  plot(df$gene,df$yDist,
+       ylim=c(-1,2),
+       pch=19,
+       cex=0.2)
+dev.off()
+#Make a matrix with a random 10 cells for each gene
+spCnts = (scPBMC$toc-out)[toDisp,scPBMC$metaData$cluster==tgtClust]
+x = t(as.matrix(round(spCnts[,sample(ncol(spCnts),10)])))
+y = t(as.matrix(scPBMC$toc[colnames(x),rownames(x)]))
+rownames(x) = paste0('Cell',c(1:5,(ncol(spCnts)-4):ncol(spCnts)))
+
+
+
+
 
 ###########################
-#*************************#
-#* Load and process data *#
-#*************************#
+# Species mix experiments #
 ###########################
-
+#Load each of the different technologies
+scMixes = list()
+##########
+# DropSeq
+ideal = readMM('Data/DropSeqMixture/SRR1748411/quants_mat.mtx.gz')
+ideal = t(ideal)
+ideal@x = round(ideal@x)
+rownames(ideal) = read.table('Data/DropSeqMixture/SRR1748411/quants_mat_cols.txt')[,1]
+colnames(ideal) = read.table('Data/DropSeqMixture/SRR1748411/quants_mat_rows.txt')[,1]
+hgGenes= grep('ENSG',rownames(ideal),value=TRUE)
+mmGenes = grep('ENSM',rownames(ideal),value=TRUE)
+hgCnts = colSums(ideal[hgGenes,])
+mmCnts = colSums(ideal[mmGenes,])
+#Designate cells, excluding doublets
+cells = colnames(ideal)[colSums(ideal) >= 5000 & colSums(ideal>0) >=300 & pmin(mmCnts,hgCnts)/colSums(ideal)<0.2 ]
+scMix = SoupChannel(ideal,ideal[,cells],dataType='DropSeq',keepDroplets=TRUE,soupRange=c(10,100))
+scMix$hgCnts = colSums(scMix$tod[hgGenes,])
+scMix$mmCnts = colSums(scMix$tod[mmGenes,])
+isHuman = scMix$hgCnts[colnames(scMix$toc)] > scMix$mmCnts[colnames(scMix$toc)]
+isDoublet = pmin(scMix$hgCnts[colnames(scMix$toc)], scMix$mmCnts[colnames(scMix$toc)])>=1000
+scMix$isHuman = isHuman
+scMix$isDoublet = isDoublet
+scMix$hgGenes = hgGenes
+scMix$mmGenes = mmGenes
+scMix$seurat = standard10X(scMix$toc) 
+scMix = setClusters(scMix,scMix$seurat@active.ident)
+scMixes[['DropSeq']]=scMix
+######
+# 10X
+hg = Read10X(fp_idealHg)
+mm = Read10X(fp_idealMm)
+#Combine
+ideal = rbind(hg,mm)
+#Use cut-off to select cells
+cells = colnames(ideal)[colSums(ideal) >= 1000 & colSums(ideal>0) >= 500]
+#Now construct the soupchannels
+scMix = SoupChannel(ideal,ideal[,cells],dataType='10X',keepDroplets=TRUE)
+hgGenes = grep('^hg19_',rownames(scMix$tod),value=TRUE)
+mmGenes = grep('^mm10_',rownames(scMix$tod),value=TRUE)
+#Store useful bits of information
+scMix$hgCnts = colSums(scMix$tod[hgGenes,])
+scMix$mmCnts = colSums(scMix$tod[mmGenes,])
+#Calculate the contamination
+isHuman = scMix$hgCnts[colnames(scMix$toc)] > scMix$mmCnts[colnames(scMix$toc)]
+isDoublet = pmin(scMix$hgCnts[colnames(scMix$toc)], scMix$mmCnts[colnames(scMix$toc)])>=1000
+scMix$isHuman = isHuman
+scMix$isDoublet = isDoublet
+scMix$hgGenes = hgGenes
+scMix$mmGenes = mmGenes
+scMix$seurat = standard10X(scMix$toc) 
+scMix = setClusters(scMix,scMix$seurat@active.ident)
+scMixes[['10X']]=scMix
+########################
+# Calculate rho for all
+for(tNom in names(scMixes)){
+  scMix = scMixes[[tNom]]
+  message(sprintf("Processing for technology %s",tNom))
+  #Define the genes to use for estimation
+  geneSets = list(hg=scMix$hgGenes,
+                  mm=scMix$mmGenes)
+  #We could do this manually, but the automated thing gets it 100% right
+  useToEst = estimateNonExpressingCells(scMix,nonExpressedGeneList=geneSets,clusters=FALSE)
+  #Calculate a global rho
+  scMix$globalRho = calculateContaminationFraction(scMix,nonExpressedGeneList=geneSets,useToEst=useToEst)$metaData$rho[1]
+  #And now the fine-grained estimation
+  scMix = calculateContaminationFraction(scMix,nonExpressedGeneList=geneSets,useToEst=useToEst,verbose=TRUE,cellSpecificEstimates=TRUE,stanParams= list(chains = 1, warmup = 8000, iter = 48000, cores = 1))
+  scMixes[[tNom]] = scMix
+}
+################
+# Lobster plot
+#Make one version of this for all techs
+for(tNom in names(scMixes)){
+  scMix = scMixes[[tNom]]
+  df = data.frame(hg=scMix$hgCnts,mm=scMix$mmCnts,isCell=colnames(scMix$tod) %in% colnames(scMix$toc))
+  df$isDoublet = FALSE
+  df[rownames(scMix$metaData),'isDoublet'] = scMix$isDoublet[rownames(scMix$metaData)]
+  #df = data.frame(hg=hg_umiCounts,mm=mm_umiCounts,qval=qval)
+  df$M = log10(0.5*(df$hg+df$mm))
+  df$A = log10(df$hg/df$mm)
+  ext = ceiling(1.01*max(abs(df$A[is.finite(df$A)])))
+  df$A[df$A == -Inf] = -ext
+  df$A[df$A == Inf] = ext
+  #Drop the doublets
+  df = df[!df$isDoublet,]
+  #Estimate global rho for two populations
+  rho_hg = log10(mean(scMix$metaData$rho[!scMix$isDoublet & scMix$isHuman])/2)
+  rho_mm = log10(mean(scMix$metaData$rho[!scMix$isDoublet & !scMix$isHuman])/2)
+  #Make the plot
+  doPlot = function(mode=c('All','Raster','Text')){
+    mode = match.arg(mode)
+    if(mode=='Raster'){
+      plot(df$M,df$A,
+           type='n',
+           xaxt='n',
+           yaxt='n',
+           frame.plot=FALSE,
+           xlab='',
+           ylab=''
+           )
+    }else{
+      plot(df$M,df$A,
+           type='n',
+           frame.plot=FALSE,
+           xlab='log10(Average UMIs)',
+           ylab='log10(Human/Mouse)'
+           )
+      legend('topright',
+             legend=c('Yes','No'),
+             pch=19,
+             col=c('black',grey(0.7)),
+             title='Droplet contains cell?',
+             bty='n',
+             xpd=TRUE)
+    }
+    if(mode!='Text'){
+      points(df$M,df$A,
+           cex=0.1,
+           pch=19,
+           col=ifelse(df$isCell,'black',grey(0.7))
+           )
+    }
+  }
+  makePlots(file.path(plotDir,sprintf('lobster_%s',tNom)),doPlot,width=3.5,height=3.5,pointsize=8,splitRaster=TRUE)
+  ###gg_lobster = ggplot(df,aes(M,A,colour=isCell)) +
+  ###  geom_point(size=1.0) +
+  ###  #geom_hline(yintercept=c(-rho_hg,rho_mm)) +
+  ###  labs(colour='Is a cell?') +
+  ###  xlab('log10(Average UMIs)') +
+  ###  ylab('log10(Human/Mouse)') +
+  ###  scale_colour_manual(values=colPal[1:2]) +
+  ###  guides(colour=FALSE) + 
+  ###  theme_bw(base_size=18)
+  ###pdf(file.path(plotDir,sprintf('lobster_%s.pdf',tNom)))
+  ###plot(gg_lobster)
+  ###dev.off()
+  ###png(file.path(plotDir,sprintf('lobster_%s.png',tNom)),width=7,height=7,units='in',res=rasterRes)
+  ###plot(gg_lobster)
+  ###dev.off()
+}
+########################
+# Soup/Cell correlation 
+#Get just the human counts in human cells and mouse counts in mouse cells
+for(tNom in names(scMixes)){
+  scMix = scMixes[[tNom]]
+  spFrac = scMix$soupProfile$counts
+  clFrac = rowSums(scMix$toc)
+  #Sub-sample to match
+  rat = sum(spFrac)/sum(clFrac)
+  clFrac = rbinom(length(clFrac),clFrac,rat)
+  doPlot = function(mode=c('All','Raster','Text')){
+    mode = match.arg(mode)
+    x=spFrac
+    y=clFrac
+    plot(x,
+         y,
+         log='xy',
+         type='n',
+         las=1,
+         xlab='Counts in background',
+         ylab='Counts in cells',
+         frame.plot=FALSE
+         )
+    if(mode!='Text'){
+      abline(0,1,col='black')
+      points(x,
+             y,
+             cex=0.1,
+             pch=19,
+             #col=ifelse(df$species=='human',colPal[1],colPal[2])
+             col='black'
+             )
+    }
+    cc=cor(x,y)
+    text(1,1000,bquote(R^2 == .(format(cc,digits=2))),adj=c(0,0.5))
+    #text(-5,-2.3,label=labs[2])
+  }
+  makePlots(file.path(plotDir,sprintf('idealCorrelation_%s',tNom)),doPlot,width=3.5,height=3.5,pointsize=8,splitRaster=FALSE)
+  ###dat = scMix$toc
+  ###isHuman = scMix$hgCnts[colnames(dat)] > scMix$mmCnts[colnames(dat)]
+  ###isDoublet = scMix$isDoublet[colnames(dat)]
+  ###hgSoup = scMix$soupProfile[scMix$hgGenes,'est']
+  ###mmSoup = scMix$soupProfile[scMix$mmGenes,'est']
+  ####dat = ideal[,idealCells]
+  ####isHuman = hgCnts[idealCells]>mmCnts[idealCells]
+  ####isDoublet = pmin(hgCnts[idealCells],mmCnts[idealCells])>=1000
+  ###hgCell = (dat[scMix$hgGenes,isHuman & !isDoublet])
+  ###hgCell = Matrix::rowSums(hgCell)/sum(hgCell)
+  ####hgSoup = idealSoup$est[grep('hg',rownames(idealSoup))]
+  ###hgSoup = hgSoup/sum(hgSoup)
+  ###mmCell = (dat[scMix$mmGenes,!isHuman & !isDoublet])
+  ###mmCell = Matrix::rowSums(mmCell)/sum(mmCell)
+  ####mmSoup = idealSoup$est[grep('mm',rownames(idealSoup))]
+  ###mmSoup = mmSoup/sum(mmSoup)
+  ###df = data.frame(cellFrac = c(hgCell,mmCell),
+  ###                soupFrac = c(hgSoup,mmSoup),
+  ###                species = rep(c('human','mouse'),c(length(hgCell),length(mmCell)))
+  ###                )
+  ####Drop the top expressed genes as they will skew correlation and likely are biological 
+  ###w = which(df$cellFrac < quantile(df$cellFrac,0.99) & df$soupFrac < quantile(df$soupFrac,0.99))
+  ###tmp = df[w,]
+  ###hgCor = cor(tmp$cellFrac[tmp$species=='human'],tmp$soupFrac[tmp$species=='human'])
+  ###mmCor = cor(tmp$cellFrac[tmp$species=='mouse'],tmp$soupFrac[tmp$species=='mouse'])
+  ###labs = c(sprintf('R^2 == %.02f (Human)',hgCor),
+  ###         sprintf('R^2 == %.02f (Mouse)',mmCor))
+  ####Alterantive total correlation
+  ###totCor = cor(tmp$cellFrac,tmp$soupFrac)
+  ###labs = sprintf('R^2 = %.02f',totCor)
+  ####Just a straight correlation plot
+  ###doPlot = function(textOnly=FALSE){
+  ###  x=log10(df$cellFrac)
+  ###  y=log10(df$soupFrac)
+  ###  plot(x,
+  ###       y,
+  ###       type='n',
+  ###       las=1,
+  ###       xlab='Average expression in cells',
+  ###       ylab='Average expression in background',
+  ###       frame.plot=FALSE
+  ###       )
+  ###  if(!textOnly){
+  ###    abline(0,1,col='black')
+  ###    points(x,
+  ###           y,
+  ###           cex=0.1,
+  ###           pch=19,
+  ###           #col=ifelse(df$species=='human',colPal[1],colPal[2])
+  ###           col='black'
+  ###           )
+  ###  }
+  ###  text(-5,-2,labs[1])
+  ###  #text(-5,-2.3,label=labs[2])
+  ###}
+  ###pdf(file.path(plotDir,sprintf('idealCorrelation_%s_textOnly.pdf',tNom)),width=3.5,height=3.5,pointsize=8,useDingbats=FALSE)
+  ###  doPlot(TRUE)
+  ###dev.off()
+  ###pdf(file.path(plotDir,sprintf('idealCorrelation_%s.pdf',tNom)),width=3.5,height=3.5,pointsize=8,useDingbats=FALSE)
+  ###  doPlot()
+  ###dev.off()
+  ###png(file.path(plotDir,sprintf('idealCorrelation_%s.png',tNom)),width=3.5,height=3.5,units='in',res=rasterRes,pointsize=8)
+  ###  doPlot()
+  ###dev.off()
+  ###gg_idealCor = ggplot(df,aes(log10(cellFrac),log10(soupFrac))) +
+  ###  geom_point(aes(colour=species),size=1.0,alpha=1) +
+  ###  geom_abline(intercept=0,slope=1) +
+  ###  annotate('text',x=-5,y=-2,label= labs[1],parse=TRUE) +
+  ###  annotate('text',x=-5,y=-2.3,label= labs[2],parse=TRUE) +
+  ###  xlab('log10(cell expression)') +
+  ###  ylab('log10(soup expression)') +
+  ###  scale_colour_manual(values=colPal[1:2]) + 
+  ###  guides(colour=FALSE) +
+  ###  theme_bw(base_size=18)
+  ####The MA plot instead 
+  ####gg_idealCor = ggplot(df,aes(log10(0.5*(cellFrac+soupFrac)),log10(cellFrac/soupFrac))) +
+  ####  geom_point(aes(colour=species)) +
+  ####  geom_hline(yintercept=0) +
+  ####  annotate('text',x=-2,y=-2,label= labs[1],parse=TRUE) +
+  ####  annotate('text',x=-2,y=-2.3,label= labs[2],parse=TRUE) +
+  ####  xlab('log10(Average expression)') +
+  ####  ylab('log10(cell/soup)') +
+  ####  xlim(-6,NA) +
+  ####  guides(colour=FALSE) +
+  ####  theme_bw(base_size=18)
+  ####  #ggtitle(sprintf('Gene correlation between cell and soup\n R=%g,%g for human,mouse',cor(hgCell,hgSoup),cor(mmCell,mmSoup)))
+  ###pdf(file.path(plotDir,sprintf('idealCorrelation_%s.pdf',tNom)))
+  ###plot(gg_idealCor)
+  ###dev.off()
+  ###png(file.path(plotDir,sprintf('idealCorrelation_%s.png',tNom)),width=7,height=7,units='in',res=rasterRes)
+  ###plot(gg_idealCor)
+  ###dev.off()
+}
 ####################
-# Load shared data #
-####################
+# Cell specific rho
+#Make one plot that contains everything
+df = lapply(names(scMixes),function(e) {
+              tmp = scMixes[[e]]$metaData
+              tmp$isDoublet = scMixes[[e]]$isDoublet[rownames(tmp)]
+              tmp$isHuman = scMixes[[e]]$isHuman[rownames(tmp)]
+              tmp$techName = e
+              tmp})
+df = do.call(rbind,df)
+df = df[!df$isDoublet,]
+doPlot = function(mode=c('All','Raster','Text')){
+  mode = match.arg(mode)
+  #Transparency code
+  alpha=0.4
+  hexAlpha = toupper(as.hexmode(round(alpha*255)))
+  #Define layout
+  zones=matrix(c(1,2), ncol=2, byrow=TRUE)
+  layout(zones, widths=c(1/10,9/10), heights=c(1))
+  #Make density plots by tech
+  s = lapply(split(df$rho,df$techName),density)
+  maxDen = 100
+  maxRho = 0.2
+  tmp = density(df$rho)
+  par(mar=c(5,0,4,0))
+  plot(0,0,type='n',
+       xlim=c(-maxDen,0),
+       ylim=c(0,maxRho),
+       frame.plot=FALSE,
+       xaxt='n',
+       yaxt='n',
+       xlab='Frequency',
+       ylab='')
+  for(i in seq_along(s)){
+    lines(-s[[i]]$y*maxDen/max(s[[i]]$y),s[[i]]$x,col=colPal[i])
+    polygon(c(0,-s[[i]]$y*maxDen/max(s[[i]]$y),0),c(0,s[[i]]$x,max(s[[i]]$x)),col=paste0(colPal[i],hexAlpha))
+  }
+  #And the plots of rho
+  par(mar=c(5,4,4,2))
+  plot(0,0,type='n',
+       xlim=range(log10(df$nUMIs)),
+       ylim=c(0,maxRho),
+       las=1,
+       frame.plot=FALSE,
+       xlab='log10(#UMIs)',
+       ylab='Contamination Fraction')
+  tNoms = names(s)
+  for(i in seq_along(tNoms)){
+    tNom=tNoms[i]
+    w = which(df$techName==tNom)
+    x = log10(df$nUMIs)[w]
+    y = df$rho[w]
+    points(x,y,
+           pch=19,
+           col=paste0(colPal[i],hexAlpha),
+           cex=0.3)
+    sm = smooth.spline(x,y,nknots=5)
+    lines(sm$x,sm$y,col=colPal[i])
+  }
+}
+makePlots(file.path(plotDir,'rhoMixTrend'),doPlot,width=4.5,height=3.5,pointsize=8,splitRaster=FALSE)
+#gg = ggplot(df,aes(x=log10(nUMIs),rho,colour=techName)) + 
+#  geom_point(size=0.5) +
+#  geom_smooth() +
+#  scale_colour_manual(values=colPal[seq_len(length(scMixes))]) + 
+#  xlab('log10(#UMIs)') +
+#  ylab('Contamination Fraction')
+##Add marginal distribution on left
+#yPlot = ggplot(df,aes(rho,fill=techName)) + 
+#  geom_density(alpha=0.5) +
+#  coord_flip() +
+#  scale_y_reverse() +
+#  scale_fill_manual(values=colPal[seq_len(length(scMixes))]) + 
+#  guides(colour=FALSE,fill=FALSE) +
+#  theme_nothing()
+#ggp = plot_grid(yPlot,gg,align='v',axis='r',nrow=1,ncol=2,rel_widths=c(1,4))
+###pdf(file.path(plotDir,'rhoMixTrend.pdf'),width=4.5,height=3.5,useDingbats=FALSE,pointsize=8)
+###  doPlot()
+###dev.off()
+###png(file.path(plotDir,'rhoMixTrend.png'),width=4.5,height=3.5,units='in',res=rasterRes,pointsize=8)
+###  doPlot()
+###dev.off()
+#####################
+# Species retention 
+#Get the corrected counts
+df = list()
+for(tNom in names(scMixes)){
+  scMix = scMixes[[tNom]]
+  #Use global estimate
+  scMix = setContaminationFraction(scMix,scMix$globalRho)
+  out = adjustCounts(scMix,verbose=2,nCores=nCores)
+  tmp = data.frame(mFracNew = colSums(out[scMix$mmGenes,])/colSums(out),
+                   mFracOld = colSums(scMix$toc[scMix$mmGenes,])/scMix$metaData[colnames(out),'nUMIs'],
+                   hFracNew = colSums(out[scMix$hgGenes,])/colSums(out),
+                   hFracOld = colSums(scMix$toc[scMix$hgGenes,])/scMix$metaData[colnames(out),'nUMIs'],
+                   isHuman = scMix$isHuman[colnames(out)],
+                   isDoublet = scMix$isDoublet[colnames(out)])
+  #tmp$isHuman = tmp$hFracOld>0.5
+  #tmp$isDoublet = FALSE
+  tmp$mRatio = tmp$mFracNew/tmp$mFracOld
+  tmp$hRatio = tmp$hFracNew/tmp$hFracOld
+  tmp = melt(tmp[!tmp$isDoublet,],id.vars='isHuman',measure.vars=c('mRatio','hRatio'))
+  tmp$crossSpecies = xor(tmp$isHuman,grepl('h',tmp$variable))
+  tmp$techName = tNom
+  df[[tNom]] = tmp
+}
+df = do.call(rbind,df)
+doPlot = function(mode=c('All','Raster','Text')){
+  mode = match.arg(mode)
+  #Block left 0-2 (with buffer)
+    #Block inner-left 0.2-1 (with buffer)
+      #0.3 - 0.9
+    #Block inner-right 1-1.8 (with buffer)
+      #1.1 - 1.7
+  #Block right 2-4 (with buffer)
+    #
+  plot(0,0,
+       xlim = c(0,4),
+       ylim = c(0,1.2),
+       las=1,
+       type='n',
+       xaxt='n', 
+       xlab='',
+       ylab='Fractional Change',
+       frame.plot=FALSE
+       )
+  axis(1,at=c(1,3),labels=c('True\nCounts','Contaminating\nCounts'),padj=0.5)
+  abline(h=1)
+  #Within species
+  #10X
+  sets = list(list(cs=FALSE,tn='10X',col=colPal[1],mid=0.6),
+              list(cs=FALSE,tn='DropSeq',col=colPal[2],mid=1.4),
+              list(cs=TRUE,tn='10X',col=colPal[1],mid=2.6),
+              list(cs=TRUE,tn='DropSeq',col=colPal[2],mid=3.4))
+  for(set in sets){
+    x = df$value[df$crossSpecies==set$cs & df$techName==set$tn]
+    points(set$mid+ runif(length(x),-.25,.25),
+           x,
+           col=colAlpha(set$col,0.1),
+           pch=19,
+           cex=0.1
+    )
+    boxplot(x,
+            col=NA,
+            at=set$mid,
+            boxwex=1.0,
+            border=set$col,
+            outline=FALSE,
+            add=TRUE,
+            xaxt='n', 
+            yaxt='n', 
+            bty='n',
+            frame.plot=FALSE
+    )
+  }
+  legend('topright',
+         legend=c('10X','DropSeq'),
+         fill=colPal,
+         bty='n',
+         title='Experiment',
+         xpd=TRUE)
+}
+makePlots(file.path(plotDir,'speciesMixPerformance'),doPlot,width=3,height=4,pointsize=8,splitRaster=FALSE)
+#gg = ggplot(df,aes(crossSpecies,value,colour=techName)) +
+#  geom_hline(yintercept=1.0,colour='black') +
+#  geom_point(position=position_jitterdodge(jitter.width=0.25),size=0.1,alpha=0.4) +
+#  geom_boxplot(outlier.colour=NA,alpha=0.5) + 
+#  xlab('Cross species') +
+#  ylab('Fraction retained') +
+#  scale_colour_manual(values=rep(colPal[seq_len(length(scMixes))],2)) +
+#  theme_classic() +
+#  guides(colour=FALSE)
+#pdf(file.path(plotDir,'speciesMixPerformance.pdf'),width=2.5,height=3.5,pointsize=8,useDingbats=FALSE)
+#  doPlot()
+#dev.off()
+#png(file.path(plotDir,'speciesMixPerformance.png'),width=2.5,height=3.5,units='in',res=rasterRes,pointsize=8)
+#  doPlot()
+#dev.off()
+###########################################
+# Compare effective rho with estimated one
+df = list()
+for(tNom in names(scMixes)){
+  scMix = scMixes[[tNom]]
+  trueRho = scMix$metaData$rho
+  out = adjustCounts(scMix,verbose=2,nCores=nCores)
+  effRho = colSums(scMix$toc-out)/colSums(scMix$toc)
+  df[[tNom]] = data.frame(nUMIs = scMix$metaData$nUMIs,
+                          trueRho = trueRho,
+                          effRho = effRho,
+                          tNom = tNom)
+}
+df = do.call(rbind,df)
+doPlot = function(mode=c('All','Raster','Text')){
+  tmp = c(df$trueRho,df$effRho)
+  plot(0,0,
+       type='n',
+       frame.plot=FALSE,
+       xlim=range(tmp),
+       ylim=range(tmp),
+       xlab='True contamination',
+       ylab='Effective contamination',
+       log='xy')
+  abline(0,1,col='black')
+  points(df$trueRho,df$effRho,
+         pch=19,
+         cex=0.3,
+         col=ifelse(df$tNom=='DropSeq',colPal[1],colPal[2])
+         )
+}
+makePlots(file.path(plotDir,'speciesMixEffectiveRho'),doPlot,width=7,height=7,pointsize=8,splitRaster=FALSE)
+###xx = log10(scMix$metaData$nUMIs)
+###plot(xx,trueRho,pch=19,cex=0.1)
+###points(xx,effRho,pch=19,cex=0.1,col='black')
+###segments(xx,trueRho,xx,effRho,col=ifelse(trueRho>effRho,'red','green'))
+###abline(h=scMix$globalRho)
+###plot(xx,effRho,pch=19,cex=0.1)
+####points(xx,effRho,pch=19,cex=0.1,col='black')
+###segments(xx,rep(scMix$globalRho,length(xx)),xx,effRho,col=ifelse(effRho>scMix$globalRho,'green','red'))
+###abline(h=scMix$globalRho)
+###################################################
+#### Comparison of different methods of correction
+###noClustFit = adjustCounts(sc,FALSE,'multinomial',verbose=2)
+###subFit = adjustCounts(sc,clusters,'subtraction',verbose=2)
+###multFit = adjustCounts(sc,clusters,'multinomial',verbose=2)
+###tt = adjustCounts(sc,FALSE,'multinomial',verbose=2)
+###pFit = adjustCounts(sc,clusters,'soupOnly',verbose=2)
+####Check the effective rho from cluster expansion to that from direct estimation
+###directRho = sc$metaData$rho
+###effectiveRho = colSums(sc$toc-multFit)/colSums(sc$toc)
+####Compare the estimation from multinomial to subtraction
+###a = as.matrix(sc$toc-subFit)
+###b = as.matrix(sc$toc-multFit)
+###diff = sapply(seq(ncol(subFit)),function(e) cor(a[,e],b[,e]))
+####Fraction of cross-speciesness
+###df = list()
+###tgtFits = list(subFit=subFit,multFit=multFit,pFit=pFit)
+###for(tNom in names(tgtFits)){
+###  tgtFit = tgtFits[[tNom]]
+###  tmp = data.frame(mFracNew = colSums(tgtFit[sc$mmGenes,])/colSums(tgtFit),
+###                   mFracOld = colSums(sc$toc[sc$mmGenes,])/colSums(sc$toc),
+###                   hFracNew = colSums(tgtFit[sc$hgGenes,])/colSums(tgtFit),
+###                   hFracOld = colSums(sc$toc[sc$hgGenes,])/colSums(sc$toc),
+###                   isHuman = sc$isHuman[colnames(tgtFit)],
+###                   isDoublet = sc$isDoublet[colnames(tgtFit)],
+###                   cellID = colnames(tgtFit)
+###  )
+###  #tmp$isHuman = tmp$hFracOld>0.5
+###  #tmp$isDoublet = FALSE
+###  tmp$mRatio = tmp$mFracNew/tmp$mFracOld
+###  tmp$hRatio = tmp$hFracNew/tmp$hFracOld
+###  tmp = melt(tmp[!tmp$isDoublet,],id.vars=c('cellID','isHuman'),measure.vars=c('mRatio','hRatio'))
+###  tmp$crossSpecies = xor(tmp$isHuman,grepl('h',tmp$variable))
+###  tmp$techName = tNom
+###  df[[tNom]] = tmp
+###}
+###df = do.call(rbind,df)
+###df$clusterID = bu_clusters[df$cellID]
+###df$nUMIs = cut(sc$metaData[df$cellID,'nUMIs'],10)
+###gg = ggplot(df,aes(crossSpecies,value,colour=techName)) +
+###  geom_point(aes(shape=isHuman),position=position_jitterdodge(jitter.width=0.1)) +
+###  geom_boxplot(aes(shape=isHuman),outlier.colour=NA,alpha=0.5) #+ 
+###  #scale_colour_manual(values=rep(colPal[seq_len(length(tgtFits))],2))
+############################################
+#### Optimal droplets for soup calculation
+####Define "true background".  Cross-species counts in cells
+###scMix = scMixes[['10X']]
+###hgBG = rowSums(scMix$toc[scMix$mmGenes,scMix$isHuman & !scMix$isDoublet & scMix$metaData$nUMIs > 1000])
+###hgBG = hgBG/sum(hgBG)
+###mmBG = rowSums(scMix$toc[scMix$hgGenes,!scMix$isHuman & !scMix$isDoublet & scMix$metaData$nUMIs > 1000])
+###mmBG = mmBG/sum(mmBG)
+###out = list()
+###for(i in seq(100)){
+###  w = which(scMix$nDropUMIs==i)
+###  hgSoup = rowSums(scMix$tod[scMix$mmGenes,w])
+###  hgSoup = hgSoup/sum(hgSoup)
+###  mmSoup = rowSums(scMix$tod[scMix$hgGenes,w])
+###  mmSoup = mmSoup/sum(mmSoup)
+###  out[[i]] = data.frame(nUMIs=i,
+###                        cor = c(cor(hgSoup,hgBG),cor(mmSoup,mmBG),cor(c(hgSoup,mmSoup),c(hgBG,mmBG))),
+###                        species = c('human','mouse','both')
+###                        )
+###}
+###out = do.call(rbind,out)
+####Keep only the both version
+###out = out[out$species=='both',]
+###doPlot = function(e){
+###  plot(out$nUMIs,out$cor,
+###       type='n',
+###       xlab='Droplet UMI count',
+###       ylab='Correlation with true contamination',
+###       las=1,
+###       frame.plot=FALSE)
+###  points(out$nUMIs,out$cor,
+###         pch=19,
+###         col='black',
+###         cex=0.7)
+###}
+###makePlots(file.path(plotDir,'speciesMixOptimalRho'),doPlot,width=7,height=7,pointsize=8,splitRaster=FALSE)
 
-setwd(workDir)
-#Move data to directory
+
+
+
+#############
+# PBMC data #
+#############
+#Demonstration of what genes to use
+scPBMC = load10X(fp_pbmc)
+data(PBMC_DR)
+scPBMC$metaData = cbind(scPBMC$metaData,PBMC_DR)
+scPBMC$DR=c('RD1','RD2')
+colnames(scPBMC$metaData) = gsub('Cluster','clusters',colnames(scPBMC$metaData))
+###Test the mixed model version
+##library(reshape2)
+##df = melt(as.matrix(scPBMC$toc))
+##df$nUMIs = scPBMC$metaData[df$Var2,'nUMIs']
+##df$soup = scPBMC$soupProfile[df$Var1,'est']
+##df$exp = df$nUMIs*df$soup
+###Drop those rows that have 0 in soup, they contribute nothing to the variance in likelihood with rho
+##df = df[df$soup>0,]
+###Keep only the top soup genes
+##tgts = rownames(scPBMC$soupProfile)[order(-scPBMC$soupProfile$est)]
+##tgts = tgts[seq(200)]
+###Sub sample
+##ddf = df[df$Var2 %in% sample(colnames(scPBMC$toc),100),]
+##ddf = ddf[ddf$Var1 %in% tgts,]
+##fit = glmer(value ~ 0 + (exp | Var2),data=ddf,family=poisson(link='identity'),start=1,verbose=1)
+#####################
+# Gene/Cells to use
+#Now show which ones we'll use for the two sets
+igGenes = c('IGHA1','IGHA2','IGHG1','IGHG2','IGHG3','IGHG4','IGHD','IGHE','IGHM',
+            'IGLC1','IGLC2','IGLC3','IGLC4','IGLC5','IGLC6','IGLC7',
+            'IGKC')
+geneSets = list(LYZ='LYZ',IG=igGenes)
+#First plot the clustering
+df = scPBMC$metaData
+doPlot = function(mode=c('All','Raster','Text')){
+  mode = match.arg(mode)
+  plot(df$RD1,df$RD2,
+       type='n',
+       frame.plot=FALSE,
+       xlab='tSNE1',
+       ylab='tSNE2'
+       )
+  cols = colPalLarge[seq_along(unique(scPBMC$metaData$clusters)) %% length(colPalLarge) +1]
+  cols='black'
+  addDensityContours(df$RD1,df$RD2,scPBMC$metaData$clusters,nSplits=20,splitsToUse=2,col=cols)
+  points(df$RD1,df$RD2,
+         cex=0.3,
+         pch=19,
+         col=colPalLarge[as.numeric(scPBMC$metaData$clusters) %% length(colPalLarge) +1],
+         lwd=0.1,
+         #col=grey(0.6)
+         )
+  mids = aggregate(cbind(RD1,RD2) ~ clusters,data=df,FUN=mean)
+  text(mids$RD1,mids$RD2,
+       labels=mids$clusters,
+       cex=1.5
+       )
+}
+makePlots(file.path(plotDir,'usePBMC_clusters'),doPlot,width=3.5,height=3.5,pointsize=8)
+#pdf(file.path(plotDir,'usePBMC_clusters.pdf'))
+#doPlot()
+#dev.off()
+#png(file.path(plotDir,'usePBMC_clusters.png'),width=7,height=7,units='in',res=rasterRes)
+#doPlot()
+#dev.off()
+#Now the usage
+for(tgt in names(geneSets)){
+  useToEst = estimateNonExpressingCells(scPBMC,geneSets[tgt])
+  gg = plotMarkerMap(scPBMC,geneSets[[tgt]],useToEst=useToEst)
+  df = gg$data
+  df$cluster = scPBMC$metaData[rownames(df),'clusters']
+  doPlot = function(mode=c('All','Raster','Text')){
+    mode = match.arg(mode)
+    plot(df$RD1,df$RD2,
+         type='n',
+         frame.plot=FALSE,
+         xlab='tSNE1',
+         ylab='tSNE2'
+         )
+    #Work out which are the approved clusters
+    appClust = unique(df$cluster[df$useToEst])
+    clust = factor(df$cluster)
+    cols = ifelse(levels(clust) %in% appClust,'black','black')
+    lwds = ifelse(levels(clust) %in% appClust,2,1)
+    #shadeCols = ifelse(levels(clust) %in% appClust,grey(0.8,0.7),NA)
+    shadeCols = ifelse(levels(clust) %in% appClust,NA,NA)
+    #shadeCols = ifelse(levels(clust) %in% appClust,colAlpha('darkgreen',0.2),NA)
+    addDensityContours(df$RD1,df$RD2,df$cluster,nSplits=20,splitsToUse=2,col=cols,lwd=lwds,shadeCol=shadeCols)
+    #Add the ones with NAs as dots
+    w = is.na(df$logRatio)
+    points(df$RD1[w],df$RD2[w],cex=0.1,pch=19,col='black')
+    #Work out colour gradients
+    cols = circlize::colorRamp2(seq(-2,2,length.out=length(divColPal)),divColPal)
+    points(df$RD1[!w],df$RD2[!w],
+           cex=0.7,
+           #lwd=0.1,
+           pch=19,
+           #col = 'black',
+           col=cols(df$logRatio[!w]),
+           #col=grey(0.6)
+           )
+    addColorBar('topleft',col=divColPal,breaks=c(-2,2),title='logRatio')
+  }
+  makePlots(file.path(plotDir,sprintf('usePBMC_%s',tgt)),doPlot,width=3.5,height=3.5,pointsize=8)
+}
+##############
+# Annotation
+cMap = c('0'='MNP',
+         '1'='CD8 T-Cell',
+         '2'='CD8 T-Cell',
+         '3'='CD4 T-Cell',
+         '4'='B-Cell',
+         '5'='CD4 T-Cell',
+         '6'='NK',
+         '7'='B-Cell',
+         '8'='NK',
+         '9'='MNP',
+         '10'='MNP',
+         '11'='?')
+PBMC_DR$Annotation = factor(cMap[as.character(PBMC_DR$Cluster)])
+mids = lapply(split(PBMC_DR[,1:2],PBMC_DR$Annotation),apply,2,mean)
+mids = cbind(as.data.frame(do.call(rbind,mids)),Annotation=names(mids))
+mids[1,1:2]= mids[1,1:2]+5
+#Don't label the ?
+mids = mids[mids$Annotation!='?',]
+doPlot = function(mode=c('All','Raster','Text')){
+  mode = match.arg(mode)
+  df = PBMC_DR
+  colnames(df) = gsub('Cluster','clusters',colnames(df))
+  plot(df$RD1,df$RD2,
+       type='n',
+       frame.plot=FALSE,
+       xlab='tSNE1',
+       ylab='tSNE2'
+       )
+  #Work out which are the approved clusters
+  clust = factor(df$clusters)
+  shadeColMap = setNames(colAlpha(colPalLarge[seq_along(unique(df$Annotation))],0.4),levels(factor(df$Annotation)))
+  shadeCols = as.numeric(factor(df$Annotation[match(levels(clust),df$clusters)]))
+  shadeCols = colAlpha(colPalLarge[shadeCols],0.4)
+  shadeCols = shadeColMap[df$Annotation[match(levels(clust),df$clusters)]]
+  #shadeCols = ifelse(levels(clust) %in% appClust,colAlpha('darkgreen',0.2),NA)
+  addDensityContours(df$RD1,df$RD2,df$clusters,nSplits=20,splitsToUse=2,shadeCol=shadeCols)
+  points(df$RD1,df$RD2,
+         cex=0.2,
+         pch=19,
+         col = 'black',
+         bg = colAlpha(grey(0.8),0.8)
+         )
+  #Precise placement
+  points(-25,20,bg=shadeColMap['MNP'],lwd=1,cex=2,pch=22)
+  text(-25,20,'MNP',adj=-0.2)
+  points(-10,-30,bg=shadeColMap['NK'],lwd=1,cex=2,pch=22)
+  text(-10,-30,'NK',adj=-0.2)
+  points(25,-15,bg=shadeColMap['B-Cell'],lwd=1,cex=2,pch=22)
+  text(25,-15,'B-Cell',xpd=NA,adj=-0.2)
+  points(0,30,bg=shadeColMap['CD4 T-Cell'],lwd=1,cex=2,pch=22)
+  text(0,30,'CD4 T-Cell',adj=-0.2)
+  points(20,30,bg=shadeColMap['CD8 T-Cell'],lwd=1,cex=2,pch=22)
+  text(20,30,'CD8 T-Cell',adj=-0.2)
+  #Legend
+  #legend(x='topleft',
+  #       legend = levels(factor(df$Annotation)),
+  #       #legend=c('B-Cell','CD4 T-Cell','CD8 T-Cell','MNP','NK'),
+  #       fill = colAlpha(colPalLarge[seq_along(levels(factor(df$Annotation)))],0.4),
+  #       title = 'Cell Type',
+  #       bty='n',
+  #       xpd=NA)
+}
+makePlots(file.path(plotDir,'PBMC_annotation'),doPlot,splitRaster=FALSE,width=3.5,height=3.5,pointsize=8)
+#pdf(file.path(plotDir,'PBMC_annotation.pdf'))
+#doPlot()
+#dev.off()
+#png(file.path(plotDir,'PBMC_annotation.png'),width=7,height=7,units='in',res=rasterRes)
+#doPlot()
+#dev.off()
+#######################
+# Show DE of key genes
+useToEst = estimateNonExpressingCells(scPBMC,geneSets['IG'])
+scPBMC = calculateContaminationFraction(scPBMC,geneSets['IG'],useToEst)
+out = adjustCounts(scPBMC,verbose=2,nCores=nCores)
+bad = standard10X(scPBMC$toc,res=1.0)
+good = standard10X(out,res=1.0)
+#Get the reference annotation in each cluster
+bad@meta.data$Annotation = PBMC_DR[rownames(bad@meta.data),'Annotation']
+good@meta.data$Annotation = PBMC_DR[rownames(good@meta.data),'Annotation']
+#Get the consensu annotation for each cluster
+tt = table(bad@active.ident,bad@meta.data$Annotation)
+bad@meta.data$clusterAnn = setNames(colnames(tt)[apply(tt,1,which.max)],rownames(tt))[as.character(bad@active.ident)]
+tt = table(good@active.ident,good@meta.data$Annotation)
+good@meta.data$clusterAnn = setNames(colnames(tt)[apply(tt,1,which.max)],rownames(tt))[as.character(good@active.ident)]
+#Get shared cluster IDs
+clust = data.frame(barcode = names(good@active.ident),
+                   goodClust = as.character(good@active.ident),
+                   badClust = as.character(bad@active.ident[names(good@active.ident)]),
+                   stringsAsFactors=TRUE)
+tt = aggregate(goodClust ~ badClust,FUN=table,data=clust)
+#Number moved
+rowSums(tt$goodClust)-apply(tt$goodClust,1,max)
+#Make a heatmap of the move, normalised to fraction of source cell
+nMap = tt$goodClust[order(as.numeric(as.character(tt$badClust))),]
+rownames(nMap) = paste0('dirtyCluster',as.character(tt$badClust)[order(as.numeric(as.character(tt$badClust)))])
+nMap = nMap[,order(as.numeric(colnames(nMap)))]
+colnames(nMap) = paste0('cleanCluster',colnames(nMap))
+#Save a count version
+clMap = nMap
+#Normalise it
+nMap = nMap/rowSums(nMap)
+#Make the heatmap
+col = c('#ffffff','#f0f0f0','#d9d9d9','#bdbdbd','#969696','#737373','#525252','#252525','#000000')
+col = circlize::colorRamp2(seq(0,1,length.out=length(col)),col)
+hm = Heatmap(nMap[seq(nrow(nMap),1),],
+             col = col,
+             name = 'Intersection',
+             cluster_rows=FALSE,
+             cluster_columns=FALSE,
+             row_title='Uncorrected Clusters',
+             row_title_side = 'left',
+             row_names_side = 'left',
+             column_title='Corrected Clusters',
+             column_title_side='bottom',
+             row_labels = rev(gsub('.*Cluster','',rownames(nMap))),
+             column_labels = gsub('.*Cluster','',colnames(nMap)),
+             row_title_gp = gpar(fontsize=8),
+             row_names_gp = gpar(fontsize=8),
+             column_title_gp = gpar(fontsize=8),
+             column_names_gp = gpar(fontsize=8),
+             heatmap_legend_param = list(title_gp = gpar(fontsize=8),
+                                         labels_gp = gpar(fontsize=8))
+             )
+doPlot = function(e){
+  print(hm)
+}
+makePlots(file.path(plotDir,'PBMC_clusterChange'),doPlot,splitRaster=FALSE,width=3.5,height=3.5,pointsize=8)
+#pdf(file.path(plotDir,'PBMC_clusterChange.pdf'))
+#print(hm)
+#dev.off()
+#png(file.path(plotDir,'PBMC_clusterChange.png'),width=7,height=7,units='in',res=rasterRes)
+#print(hm)
+#dev.off()
+##############################################################################
+# Show that on average cleaning up soup increases the logFC between clusters.
+#Full cross-mapping list
+cMap = apply(clMap,1,function(e) colnames(clMap)[e>0])
+#Use the good clustering the default one in both maps
+good@meta.data$cMap = good@active.ident
+bad@meta.data$cMap = good@meta.data[rownames(bad@meta.data),'seurat_clusters']
+bad = SetIdent(bad,rownames(bad@meta.data),bad@meta.data$cMap)
+####This will set everything correctly, except those that are split
+###cMap = setNames(colnames(tt$goodClust)[apply(tt$goodClust,1,which.max)],as.character(tt$badClust))
+###bad@meta.data$cMap = cMap[as.character(bad@active.ident)]
+###good@meta.data$cMap = as.character(good@active.ident)
+####Set this to the active ident
+###good = SetIdent(good,rownames(good@meta.data),good@meta.data$cMap)
+###bad = SetIdent(bad,rownames(bad@meta.data),bad@meta.data$cMap)
+#Get markers and compare.  This is slow, so save after it's done
+tgtFile=file.path(plotDir,'PBMC_clusterMarkers.RDS')
+if(!file.exists(tgtFile)){
+  gMarks = FindAllMarkers(good)
+  bMarks = FindAllMarkers(bad)
+  saveRDS(list(gMarks=gMarks,bMarks=bMarks),tgtFile)
+}else{
+  tmp = readRDS(tgtFile)
+  bMarks = tmp$bMarks
+  gMarks = tmp$gMarks
+}
+#Get complete set of old/new
+mMarks = bMarks
+m = match(with(gMarks,interaction(cluster,gene)),with(bMarks,interaction(cluster,gene)))
+mMarks = rbind(mMarks,gMarks[is.na(m),])
+mMarks = mMarks[,c('gene','cluster')]
+mMarks$oldFC = NA
+mMarks$newFC = NA
+mMarks$inOld = with(mMarks,interaction(cluster,gene)) %in% with(bMarks,interaction(cluster,gene))
+mMarks$inNew = with(mMarks,interaction(cluster,gene)) %in% with(gMarks,interaction(cluster,gene))
+#Get the old logFC from stractch
+for(cl in unique(mMarks$cluster)){
+  w = which(mMarks$cluster==cl)
+  a = apply(bad@assays$RNA@data[mMarks[w,'gene'],bad@active.ident==cl],1,function(e) log(mean(expm1(e))+1))
+  b = apply(bad@assays$RNA@data[mMarks[w,'gene'],bad@active.ident!=cl],1,function(e) log(mean(expm1(e))+1))
+  mMarks$oldFC[w] = a-b
+  a = apply(good@assays$RNA@data[mMarks[w,'gene'],good@active.ident==cl],1,function(e) log(mean(expm1(e))+1))
+  b = apply(good@assays$RNA@data[mMarks[w,'gene'],good@active.ident!=cl],1,function(e) log(mean(expm1(e))+1))
+  mMarks$newFC[w] = a-b
+}
+tmp = mMarks[!is.na(mMarks$oldFC),]
+tmp = tmp[sign(tmp$newFC)==sign(tmp$oldFC),]
+tmp = tmp[abs(log(tmp$newFC/tmp$oldFC))<1,]
+x = tmp$oldFC
+y = tmp$newFC/tmp$oldFC
+doPlot = function(e){
+  layout(matrix(c(1,2),ncol=2),widths=c(10,1))
+  par(mar=c(5.1,4.1,4.1,0))
+  plot(x,y,
+       las=1,
+       type='n',
+       xlab='Uncorrected Fold Change',
+       ylab='CorrectedFC/UncorrectedFC',
+       frame.plot=FALSE)
+  col = c('#f7fbff','#deebf7','#c6dbef','#9ecae1','#6baed6','#4292c6','#2171b5','#08519c','#08306b')
+  hb = addHexbin(x,y,colSet=c(grey(0.95),grey(0)),xbins=100,logCounts=TRUE,maxCnts=1000)
+  abline(h=1,col='black',lty=3)
+  #Add special ones as points
+  #w = which(xor(tmp$inOld,tmp$inNew))
+  #points(x[w],y[w],
+  #     col=ifelse(tmp$inOld[w],'red','green'),
+  #     pch=19,
+  #     cex=0.2)
+  addColorBar('topright',col=hb$col,breaks=hb$breaks,ticks=0:3,title='log10(counts)')
+  #Add right plot giving density
+  par(mar=c(5.1,0,4.1,0))
+  den = density(tmp$newFC/tmp$oldFC)
+  plot(den$y,den$x,type='n',
+       frame.plot=FALSE,
+       xaxt='n',
+       yaxt='n',
+       xlab='Frequency',
+       ylab='',
+  xpd=NA)
+  lines(den$y,den$x,col='black')
+  polygon(c(0,den$y,0),c(0,den$x,0),col=grey(0.8,alpha=0.6))
+  abline(h=1,col='black',lty=3)
+}
+makePlots(file.path(plotDir,'PBMC_foldChange'),doPlot,splitRaster=FALSE,width=5,height=3.5,pointsize=8)
+####Main plot area
+###gg = ggplot(tmp,aes(oldFC,(newFC/oldFC))) +
+###  stat_binhex(aes(fill=log10(..count..)),bins=100) +
+###  geom_hline(yintercept=1,colour='red') +
+###  geom_point(data=tmp[xor(tmp$inOld,tmp$inNew),],aes(colour=ifelse(inOld,'Uncorrected','Corrected')),size=0.1,alpha=0.6) +
+###  scale_y_continuous(position = "right") +
+###  xlab('Uncorrected Fold Change') +
+###  ylab('CorrectedFC/UncorrectedFC') +
+###  guides(colour = guide_legend(override.aes = list(size=3))) +
+###  labs(colour='Exclusive to')
+####Add marginal densities
+###xMarg = ggplot(tmp,aes(oldFC)) +
+###  geom_density(fill='black',alpha=0.3) + 
+###  geom_density(data=tmp[xor(tmp$inOld,tmp$inNew),],aes(fill=ifelse(inOld,'Uncorrected','Corrected')),alpha=0.5) +
+###  theme_void() +
+###  guides(fill=FALSE)
+###yMarg = ggplot(tmp,aes(newFC/oldFC)) +
+###  geom_density(fill='black',alpha=0.3) + 
+###  geom_density(data=tmp[xor(tmp$inOld,tmp$inNew),],aes(fill=ifelse(inOld,'Uncorrected','Corrected')),alpha=0.5) +
+###  geom_vline(xintercept=1,colour='red') +
+###  theme_void() +
+###  coord_flip() +
+###  scale_y_reverse() +
+###  guides(fill=FALSE)
+#### Align histograms with scatterplot
+###aligned_x_hist = align_plots(xMarg, gg, align = "v")[[1]]
+###aligned_y_hist = align_plots(yMarg, gg, align = "h")[[1]]
+###pg = plot_grid(
+###    #NULL
+###    #, aligned_x_hist
+###    aligned_y_hist
+###    , gg
+###    , ncol = 2
+###    , nrow = 1
+###    #, rel_heights = c(0.2, 1)
+###    , rel_widths = c(0.2, 1)
+###  )
+###pdf(file.path(plotDir,'PBMC_foldChange.pdf'),width=10)
+###plot(pg)
+###dev.off()
+###png(file.path(plotDir,'PBMC_foldChange.png'),width=10,height=7,units='in',res=rasterRes)
+###plot(pg)
+###dev.off()
+#gg = ggplot(mMarks,aes(oldFC,newFC/oldFC)) +
+#  stat_binhex(aes(fill=log10(..count..)),bins=50) +
+#  geom_hline(yintercept=1,colour='red') +
+#  geom_point(data=mMarks[xor(mMarks$inOld,mMarks$inNew),],aes(colour=ifelse(inOld,'Uncorrected','Corrected')),size=0.2) +
+#  xlab('Uncorrected Fold Change') +
+#  ylab('CorrectedFC/UncorrectedFC') +
+#  labs(colour='Exclusive to')
+#pdf(file.path(plotDir,'PBMC_foldChange.pdf'))
+#plot(gg)
+#dev.off()
+#png(file.path(plotDir,'PBMC_foldChange.png'),width=7,height=7,units='in',res=rasterRes)
+#plot(hm)
+#dev.off()
+###################################
+# Compare LYZ in MNP versus others
+tgtGenes='LYZ'
+tgtTypes='MNP'
+dePlot = function(tgtGenes,tgtTypes){
+  colSet = c('black',grey(0.6))
+  expGood = split(colSums(good@assays$RNA@data[tgtGenes,,drop=FALSE]),good@meta.data$clusterAnn %in% tgtTypes)
+  expBad = split(colSums(bad@assays$RNA@data[tgtGenes,,drop=FALSE]),bad@meta.data$clusterAnn %in% tgtTypes)
+  #Plot it
+  df = data.frame(src=rep(c('Corrected','Uncorrected'),each=length(bad@active.ident)),
+                  exp = c(unlist(expGood),unlist(expBad)),
+                  type = ifelse(grepl('^TRUE.',names(c(unlist(expGood),unlist(expBad)))),tgtTypes[1],'Other'))
+  #Block left 0-2 (with buffer)
+    #Block inner-left 0.2-1 (with buffer)
+      #0.3 - 0.9
+    #Block inner-right 1-1.8 (with buffer)
+      #1.1 - 1.7
+  #Block right 2-4 (with buffer)
+    #
+  plot(0,0,
+       xlim = c(0,4),
+       ylim = c(0,max(df$exp)),
+       las=1,
+       type='n',
+       xaxt='n', 
+       xlab='',
+       ylab=sprintf('log(%s Expression)',tgtGenes),
+       frame.plot=FALSE
+       )
+  axis(1,at=c(1,3),labels=c('Uncorrected','Corrected'))
+  #Define the plots
+  #Within species
+  #10X
+  sets = list(list(cs='Uncorrected',tn=tgtTypes,col=colSet[1],mid=0.6),
+              list(cs='Uncorrected',tn='Other',col=colSet[2],mid=1.4),
+              list(cs='Corrected',tn=tgtTypes,col=colSet[1],mid=2.6),
+              list(cs='Corrected',tn='Other',col=colSet[2],mid=3.4))
+  for(set in sets){
+    x = df$exp[df$src == set$cs & df$type==set$tn]
+    points(set$mid+ runif(length(x),-.25,.25),
+           x,
+           col=colAlpha(set$col,0.1),
+           pch=19,
+           cex=0.1
+    )
+    boxplot(x,
+            col=NA,
+            at=set$mid,
+            boxwex=1.0,
+            border=set$col,
+            outline=FALSE,
+            add=TRUE,
+            xaxt='n', 
+            yaxt='n', 
+            bty='n',
+            frame.plot=FALSE
+    )
+  }
+  #legend('topright',
+  #       legend=c(tgtTypes,'Other'),
+  #       fill=colPal,
+  #       bty='n',
+  #       title='CellGroup',
+  #       xpd=NA)
+}
+doPlot = function(e) dePlot('LYZ','MNP')
+makePlots(file.path(plotDir,'PBMC_exampleA'),doPlot,splitRaster=FALSE,width=3.5,height=3.5,pointsize=8)
+##The bar plot
+#gg = dePlot('LYZ','MNP')
+#gg = gg + ggtitle("Change in fold-change in LYZ")
+#pdf(file.path(plotDir,'PBMC_example1A.pdf'))
+#plot(gg)
+#dev.off()
+#png(file.path(plotDir,'PBMC_example1A.png'),width=7,height=7,units='in',res=rasterRes)
+#plot(gg)
+#dev.off()
+#And the umap
+gg = plotChangeMap(scPBMC,good@assays$RNA@counts,'LYZ')
+df = gg$data
+doPlot = function(e){
+  plot(df$RD1,df$RD2,
+       type='n',
+       frame.plot=FALSE,
+       xlab='tSNE1',
+       ylab='tSNE2')
+  col = c('#fff5eb','#fee6ce','#fdd0a2','#fdae6b','#fd8d3c','#f16913','#d94801','#a63603','#7f2704')
+  #col = c(grey(0.95),'black')
+  cc = circlize::colorRamp2(seq(0,1,length.out=length(col)),col)#,transparency = 0.2)
+  #Do as in the earlier panel
+  w = is.na(df$relChange)
+  points(df$RD1[w],df$RD2[w],cex=0.1,pch=19,col='black')
+  points(df$RD1[!w],df$RD2[!w],
+         col=cc(df$relChange[!w]),
+         #col='black',
+         pch=19,
+         #lwd=0.01,
+         cex=0.7)
+  addColorBar('topleft',col=col,breaks=c(1,0),ticks=5)
+}
+makePlots(file.path(plotDir,'PBMC_exampleB'),doPlot,splitRaster=FALSE,width=3.5,height=3.5,pointsize=8)
+###gg = gg + ggtitle("Change in expression of LYZ")
+###pdf(file.path(plotDir,'PBMC_example1B.pdf'))
+###plot(gg)
+###dev.off()
+###png(file.path(plotDir,'PBMC_example1B.png'),width=7,height=7,units='in',res=rasterRes)
+###plot(gg)
+###dev.off()
+#####################
+# Genes to consider
+gg = plotMarkerDistribution(scPBMC) +
+  scale_size(range=c(0.5,2))
+doPlot = function(e) plot(gg)
+makePlots(file.path(plotDir,'guessPBMCgenes'),doPlot,width=7,height=4,pointsize=8)
+#pdf(file.path(plotDir,'guessPBMCgenes.pdf'))
+#plot(gg)
+#dev.off()
+#png(file.path(plotDir,'guessPBMCgenes.png'),width=7,height=7,units='in',res=rasterRes)
+#plot(gg)
+#dev.off()
+
+
+
+
+
+###############
+# Tumour Data #
+###############
 cMani = read.table(fp_cMani,sep='\t',header=TRUE)
-cMani$Path = file.path('KidneyTumour',cMani$Label)
+cMani$Path = file.path('Data/KidneyTumour',cMani$Label)
 #Keep just the tumour/NR channels
 cMani = cMani[cMani$TissueDiseaseState!='Normal',]
 #Exclude RCC3, it's full of failure
 cMani = cMani[cMani$Experiment!='RCC3',]
-#Load the symbol table
-symbs = read.table(file.path(cMani$Path[1],'raw_gene_bc_matrices','GRCh38','genes.tsv'),sep='\t',header=FALSE)
-symbs$merged = paste0(symbs$V2,'_',symbs$V1)
-#Convert markers to gene names
-rhoMarkers = lapply(markers,grep,symbs$merged,value=TRUE)
-#Simplify sample names
-N1 = as.integer(gsub('.*_ldc_([0-9])_([0-9])','\\1',cMani$Label))
-N2 = as.integer(gsub('.*_ldc_([0-9])_([0-9])','\\2',cMani$Label))
-#This looks a bit magical, but just constructs a unique "replicate number" for each
-simpNames = setNames(paste0(gsub('_.*','',cMani$Label),ifelse(grepl('_R_',cMani$Label),'Rest_','_'),(N1-1)*2+N2),cMani$Label)
-superSimpNames = setNames(gsub('Rest','',paste0(gsub('_.*','',simpNames),ifelse(grepl('RCC._[34]',simpNames),'_2',''))),names(simpNames))
-
-
-######################
-# Process with SoupX #
-######################
-
-#Create or load the ideal data
-if(forceRecalc | !file.exists(file.path(plotDir,'ideal_scl.RDS'))){
-  #Have to manually construct the scl object
-  hg = Read10X(fp_idealHg)
-  mm = Read10X(fp_idealMm)
-  #Combine
-  ideal = rbind(hg,mm)
-  #Use cut-off to select cells
-  cells = colnames(ideal)[colSums(ideal) >= 1000 & colSums(ideal>0) >= 500]
-  #Now construct the soupchannels
-  sc = SoupChannel(ideal,ideal[,cells],'mixture',dataType='10X',keepDroplets=TRUE)
-  #And construct the scl object
-  sclIdeal = SoupChannelList(list(sc))
-  #Add a global table of droplets
-  sclIdeal$tod = do.call(cbind,lapply(sclIdeal$channels,function(e) e$tod))
-  sclIdeal$hgCnts = colSums(sclIdeal$tod[grep('^hg19_',rownames(sclIdeal$tod)),])
-  sclIdeal$mmCnts = colSums(sclIdeal$tod[grep('^mm10_',rownames(sclIdeal$tod)),])
-  #Calculate the contamination
-  isHuman = sclIdeal$hgCnts[colnames(sclIdeal$toc)] > sclIdeal$mmCnts[colnames(sclIdeal$toc)]
-  isDoublet = pmin(sclIdeal$hgCnts[colnames(sclIdeal$toc)], sclIdeal$mmCnts[colnames(sclIdeal$toc)])>=1000
-  sclIdeal$isHuman = isHuman
-  sclIdeal$isDoublet = isDoublet
-  #The manual way
-  sclIdeal$channels$mixture$candidateNonExpressedGenes = data.frame(row.names=rownames(sclIdeal$tod),
-                                                                    mu=rep(NA,nrow(sclIdeal$tod)),
-                                                                    phi=NA,
-                                                                    isCandidate=TRUE)
-  #Create masks
-  masks = data.frame(human=grepl('^mm10_',rownames(sclIdeal$tod)),
-                     mouse=grepl('^hg19_',rownames(sclIdeal$tod)),
-                     row.names=rownames(sclIdeal$tod))
-  masks = as.matrix(masks[,ifelse(isHuman,'human','mouse')])
-  colnames(masks) = colnames(sclIdeal$toc)
-  sclIdeal$channels$mixture$unexpressedMatrix = masks
-  sclIdeal = findUnexpressedGenesByCell(sclIdeal,knownUnexpressedMatrix = masks)
-  sclIdeal = calculateContaminationFraction(sclIdeal)
-  sclIdeal = interpolateCellContamination(sclIdeal)
-  #Store the gold standard
-  sclIdeal$channels$mixture$metaData$rhosGold = sclIdeal$channels$mixture$metaData$rhos
-  sclIdeal$channels$mixture$rhoGroupedGold = sclIdeal$channels$mixture$rhoGrouped
-  sclIdeal$channels$mixture$unexpressedMatrixGold = masks
-  #Process it the standard way and using manual intervention
-  sclIdeal = findCandidateSoupGenes(sclIdeal)
-  sclIdeal = findUnexpressedGenesByCell(sclIdeal,maxContamination=0.2)
-  sclIdeal = calculateContaminationFraction(sclIdeal)
-  sclIdeal = interpolateCellContamination(sclIdeal)
-  #The manual way
-  #sclIdeal = calculateContaminationFraction(sclIdeal,'mixture',
-  #                                          list(mm=grep('^mm10_',rownames(sclIdeal$toc),value=TRUE),
-  #                                               hg=grep('^hg19_',rownames(sclIdeal$toc),value=TRUE)),
-  #                                          t(data.frame(hg=isHuman & !isDoublet,
-  #                                                     mm=!isHuman & !isDoublet)))
-  ##Infer the cell specific contamination
-  #sclIdeal = interpolateCellContamination(sclIdeal,'mixture')
-  #Clean it up
-  sclIdeal = strainCells(sclIdeal)
-  sclIdeal = adjustCounts(sclIdeal)
-  saveRDS(sclIdeal,file.path(plotDir,'ideal_scl.RDS'))
-}else{
-  sclIdeal = readRDS(file.path(plotDir,'ideal_scl.RDS'))
-}
-#Create or load the scl object
-if(!forceRecalc & file.exists(file.path(plotDir,'scl.RDS'))){
-  sclReal= readRDS(file.path(plotDir,'scl.RDS'))
-}else{
-  sclReal = load10X(cMani$Path)
-  #Work out which genes to use in each channel
+#Fix path
+cMani$Path = gsub('KidneyTumour','Tumour',cMani$Path)
+#Define markers
+geneList = list(
   igGenes = c('IGHA1','IGHA2','IGHG1','IGHG2','IGHG3','IGHG4','IGHD','IGHE','IGHM',
               'IGLC1','IGLC2','IGLC3','IGLC4','IGLC5','IGLC6','IGLC7',
-              'IGKC')
-  hgGenes = c('HBA1','HBA2','HBB','HBD','HBE1','HBG1','HBG2','HBM','HBQ1','HBZ')
-  mastGenes = c('TPSB2','TPSAB1')
-  colGenes = c('COL1A1','COL1A2','COL3A1') 
+              'IGKC'),
+  hgGenes = c('HBA1','HBA2','HBB','HBD','HBE1','HBG1','HBG2','HBM','HBQ1','HBZ'),
+  mastGenes = c('TPSB2','TPSAB1'),
+  colGenes = c('COL1A1','COL1A2','COL3A1'),
   s100Genes = c('S100A8','S100A9')
-  #The modern way
-  #Manually specify which genes to consider
-  sclReal = findCandidateSoupGenes(sclReal,includeGenes = c(igGenes,hgGenes,mastGenes,colGenes,s100Genes),nSoupGenes=0)
-  sclReal = findUnexpressedGenesByCell(sclReal,maxContamination=1.0,pThr=0.01)
-  sclReal = calculateContaminationFraction(sclReal)
-  sclReal = interpolateCellContamination(sclReal)
-  #Do additional tweaks on the unexpressed gene list for gold standard
-  estGenes = list('Channel1'=list(HG=hgGenes,MAST=mastGenes),
-                  'Channel2'=list(HG=hgGenes,MAST=mastGenes),
-                  'Channel3'=list(HG=hgGenes),
-                  'Channel4'=list(HG=hgGenes),
-                  'Channel5'=list(HG=hgGenes),
-                  'Channel6'=list(HG=hgGenes),
-                  'Channel7'=list(HG=hgGenes),
-                  'Channel8'=list(IG=igGenes),
-                  'Channel9'=list(HG=hgGenes),
-                  'Channel10'=list(IG=igGenes),
-                  'Channel11'=list(IG=igGenes),
-                  'Channel12'=list(IG=igGenes),
-                  'Channel13'=list(HG=hgGenes,MAST=mastGenes),#IGFBP7 looks the only reasonable guess
-                  'Channel14'=list(HG=hgGenes,MAST=mastGenes),#as above
-                  'Channel15'=list(IG=igGenes,HG=hgGenes),
-                  'Channel16'=list(HG=hgGenes),
-                  'Channel17'=list(HG=hgGenes),
-                  'Channel18'=list(HG=hgGenes),
-                  'Channel19'=list(HG=hgGenes,IG=igGenes),
-                  'Channel20'=list(HG=hgGenes),
-                  'Channel21'=list(HG=hgGenes),
-                  'Channel22'=list(HG=hgGenes),
-                  'Channel23'=list(HG=hgGenes,MAST=mastGenes),
-                  'Channel24'=list(HG=hgGenes,MAST=mastGenes))
-  for(channel in names(estGenes)){
-    tmp = sclReal$channels[[channel]]$unexpressedMatrix
-    for(i in which(!(rownames(tmp) %in% unlist(estGenes[[channel]]))))
-      tmp[i,]=FALSE
-    sclReal$unexpressedMatrix= tmp
+  )
+#Load each channel
+scTum = list()
+#Need something else for i=10,11,12
+tgtSet='hgGenes'
+for(i in seq(nrow(cMani))){
+  #Only one sample doesn't really play nice with hgGenes
+  if(i %in% c(10,11,12)){
+    tgtSet='igGenes'
+  }else{
+    tgtSet='hgGenes'
   }
-  #Save the gold standard
-  for(i in seq_along(sclReal$channels)){
-    sclReal$channels[[i]]$metaData$rhosGold = sclReal$channels[[i]]$metaData$rhos
-    sclReal$channels[[i]]$rhoGroupedGold = sclReal$channels[[i]]$rhoGrouped
-    sclReal$channels[[i]]$unexpressedMatrixGold = sclReal$channels[[i]]$unexpressedMatrix
+  message(cMani$Label[i])
+  scTum[[i]] = load10X(cMani$Path[i])
+  ute = estimateNonExpressingCells(scTum[[i]],nonExpressedGeneList = geneList[tgtSet])
+  if(sum(ute)==0)
+    ute = estimateNonExpressingCells(scTum[[i]],nonExpressedGeneList = geneList[tgtSet],clusters=FALSE,maximumContamination=0.6,FDR=0.05)
+  plotMarkerMap(scTum[[i]],geneSet=geneList[[tgtSet]],useToEst=ute)
+  scTum[[i]] = calculateContaminationFraction(scTum[[i]],nonExpressedGeneList=geneList[tgtSet],useToEst=ute)
+}
+#Make a spot the difference
+dirty = lapply(scTum,function(e) e$toc)
+cleaned = lapply(scTum,adjustCounts,verbose=2,nCores=nCores)
+for(i in seq(nrow(cMani))){
+  colnames(cleaned[[i]]) = paste0(cMani$Label[i],'___',colnames(cleaned[[i]]))
+  colnames(dirty[[i]]) = paste0(cMani$Label[i],'___',colnames(dirty[[i]]))
+}
+dirty = do.call(cbind,dirty)
+cleaned = do.call(cbind,cleaned)
+dirty = standard10X(dirty,res=1.0)
+cleaned = standard10X(cleaned,res=1.0)
+saveRDS(list(dirty,cleaned),file.path(plotDir,'Tumour_seurat_init.RDS'))
+###################
+# Basic source map
+#Annotation for tSNE.  Extremely quick and rough.
+#mrks = quickMarkers(dirty@assays$RNA@counts,setNames(dirty@meta.data$seurat_clusters,rownames(dirty@meta.data)),N=Inf)
+ann = c(
+        '0' = 'T',
+        '1' = 'NK',
+        '2' = 'T',
+        '3' = 'MNP',
+        '4' = 'MNP',
+        '5' = 'T',
+        '6' = 'MNP',
+        '7' = 'MNP',
+        '8' = 'ccRCC',
+        '9' = 'Endothelium',
+        '10' = 'T',
+        '11' = 'T',
+        '12' = 'ccRCC',
+        '13' = 'NK',
+        '14' = 'NK',
+        '15' = 'ccRCC',
+        '16' = 'MNP',
+        '17' = 'MNP',
+        '18' = 'NK',
+        '19' = 'T',
+        '20' = 'T',
+        '21' = 'RBC',
+        '22' = 'Fibroblast',
+        '23' = 'Wilms',
+        '24' = 'Endothelium',
+        '25' = 'MNP',
+        '26' = 'pRCC',
+        '27' = 'ccRCC',
+        '28' = 'RBC',
+        '29' = 'B',
+        '30' = 'Fibroblast',
+        '31' = 'ccRCC',
+        '32' = 'B',
+        '33' = 'ccRCC',
+        '34' = 'B',
+        '35' = 'MNP',
+        '36' = 'ccRCC'
+        )
+#ann = c(
+#        '0' = 'T',
+#        '1' = 'T',
+#        '2' = 'MNP',
+#        '3' = 'MNP',
+#        '4' = 'MNP',
+#        '5' = 'MNP',
+#        '6' = 'NK',
+#        '7' = 'Endothelium',
+#        '8' = 'T',
+#        '9' = 'T',
+#        '10' = 'NK',
+#        '11' = 'ccRCC',
+#        '12' = 'NK',
+#        '13' = 'ccRCC',
+#        '14' = 'NK',
+#        '15' = 'ccRCC',
+#        '16' = 'MNP',
+#        '17' = 'T',
+#        '18' = 'T',
+#        '19' = 'Fibroblast',
+#        '20' = 'RBC',
+#        '21' = 'MNP',
+#        '22' = 'Wilms',
+#        '23' = 'ccRCC',
+#        '24' = 'MNP',
+#        '25' = 'RBC',
+#        '26' = 'pRCC',
+#        '27' = 'Endothelium',
+#        '28' = 'ccRCC',
+#        '29' = 'B',
+#        '30' = 'B',
+#        '31' = 'Fibroblast',
+#        '32' = 'ccRCC',
+#        '33' = 'ccRCC',
+#        '34' = 'ccRCC',
+#        '35' = '?',
+#        '36' = '?'
+#        )
+#df = cbind(dirty@meta.data,dirty@reductions$tsne@cell.embeddings)
+#gg = ggplot(df,aes(tSNE_1,tSNE_2)) +
+#  geom_point(aes(colour=orig.ident),size=0.1) +
+#  scale_colour_manual(values=colPalLarge[seq(7)]) +
+#  guides(colour = guide_legend(override.aes = list(size=1))) +
+#  labs(colour='Donor') +
+#  xlab('tSNE1') +
+#  ylab('tSNE2') +
+#  theme_classic()
+#Order tweaked to make colours sensible
+colPalTum = c('T'='#B3DE69',
+              RBC='#FB8072',
+              NK="#8DD3C7",
+              Endothelium="#FCCDE5",
+              ccRCC="#FDB462",
+              pRCC="#BC80BD",
+              MNP='#FFFFB3',
+              Wilms='#BEBADA',
+              Fibroblast="#D9D9D9",
+              B='#80B1D3')
+doPlot = function(mode=c('All','Raster','Text')){
+  mode = match.arg(mode)
+  df = cbind(dirty@meta.data,dirty@reductions$tsne@cell.embeddings)
+  df$cluster = df$seurat_clusters
+  df$Annotation = ann[as.character(df$seurat_clusters)]
+  plot(df$tSNE_1,df$tSNE_2,
+       type='n',
+       frame.plot=FALSE,
+       xlab='tSNE1',
+       ylab='tSNE2'
+       )
+  #Work out which are the approved clusters
+  wKeep = df$Annotation!='?'
+  clust = factor(df$cluster[wKeep])
+  #shadeColMap = setNames(colAlpha(colPalTum[seq_along(unique(df$Annotation[wKeep]))],0.4),unique(df$Annotation[wKeep]))
+  shadeColMap = setNames(colAlpha(colPalTum,0.4),names(colPalTum))
+  shadeCols = shadeColMap[ann[levels(clust)]]
+  addDensityContours(df$tSNE_1[wKeep],df$tSNE_2[wKeep],clust,shadeCol=shadeCols,useKS=TRUE)
+  points(df$tSNE_1,df$tSNE_2,
+         cex=0.1,
+         pch=19,
+         col = grey(0.2,0.2)
+         )
+  #Precise placement
+  annPos = list(ccRCC=c(-50,-30),
+                pRCC=c(-38,-42),
+                Wilms=c(-48,40),
+                NK=c(-22,38),
+                Endothelium=c(10,50),
+                B=c(-30,45),
+                'T'=c(35,25),
+                MNP=c(35,-35),
+                RBC=c(20,-50),
+                Fibroblast=c(-30,-50))
+  for(nom in names(annPos)){
+    points(annPos[[nom]][1],annPos[[nom]][2],
+           bg = shadeColMap[nom],
+           lwd = 1,
+           cex = 2,
+           pch =22)
+    text(annPos[[nom]][1],annPos[[nom]][2],nom,
+         adj = ifelse(nchar(nom)<3,ifelse(nchar(nom)<2,-0.8,-0.5),-0.2))
   }
-  #Repeat using the standard gene selection method.  Calibrate aggressively to be sure we correct everything
-  sclReal = findCandidateSoupGenes(sclReal)
-  sclReal = findUnexpressedGenesByCell(sclReal,maxContamination=1.0,pThr=0.01)
-  sclReal = calculateContaminationFraction(sclReal)
-  sclReal = interpolateCellContamination(sclReal,interpolationMethod='fixed')
-  #scl = inferNonExpressedGenes(scl)
-  #pdf(file.path(plotDir,'inferredNonExpressed.pdf'),width=14)
-  #for(nom in names(scl$channels)){
-  #  plot(plotMarkerDistribution(scl,nom)+ggtitle(nom))
-  #}
-  #dev.off()
-  ##These are decided by looking at plotMarkerDistribution(scl,'ChannelX')
-  #estGenes = list('Channel1'=list(HG=hgGenes,MAST=mastGenes),
-  #                'Channel2'=list(HG=hgGenes,MAST=mastGenes),
-  #                'Channel3'=list(HG=hgGenes),
-  #                'Channel4'=list(HG=hgGenes),
-  #                'Channel5'=list(HG=hgGenes),
-  #                'Channel6'=list(HG=hgGenes),
-  #                'Channel7'=list(HG=hgGenes),
-  #                'Channel8'=list(IG=igGenes),
-  #                'Channel9'=list(HG=hgGenes),
-  #                'Channel10'=list(IG=igGenes),
-  #                'Channel11'=list(IG=igGenes),
-  #                'Channel12'=list(IG=igGenes),
-  #                'Channel13'=list(HG=hgGenes,MAST=mastGenes),#IGFBP7 looks the only reasonable guess
-  #                'Channel14'=list(HG=hgGenes,MAST=mastGenes),#as above
-  #                'Channel15'=list(IG=igGenes,HG=hgGenes),
-  #                'Channel16'=list(HG=hgGenes),
-  #                'Channel17'=list(HG=hgGenes),
-  #                'Channel18'=list(HG=hgGenes),
-  #                'Channel19'=list(HG=hgGenes,IG=igGenes),
-  #                'Channel20'=list(HG=hgGenes),
-  #                'Channel21'=list(HG=hgGenes),
-  #                'Channel22'=list(HG=hgGenes),
-  #                'Channel23'=list(HG=hgGenes,MAST=mastGenes),
-  #                'Channel24'=list(HG=hgGenes,MAST=mastGenes))
-  ##Now calculate the channel contamination
-  #pdf(file.path(plotDir,'contaminationEstimates.pdf'),width=14)
-  #for(nom in names(scl$channels)){
-  #  scl = calculateContaminationFraction(scl,nom,estGenes[[nom]])
-  #  plot(plotChannelContamination(scl,nom)+ggtitle(nom))
-  #}
-  #dev.off()
-  ##Decide which ones to just use global estimate
-  #useGlobal = rep(FALSE,length(scl$channels))
-  #useGlobal[c(1,7,8,9,10,11,12,19,20)] = TRUE
-  #names(useGlobal) = names(scl$channels)
-  ##Interpolate final rhos
-  #for(nom in names(scl$channels)){
-  #  scl = interpolateCellContamination(scl,nom,useGlobal=useGlobal[nom])
-  #}
-  ##Now do both corrections
-  sclReal = strainCells(sclReal)
-  sclReal = adjustCounts(sclReal,pCut=0.1)
-  saveRDS(sclReal,file.path(plotDir,'scl.RDS'))
 }
-####Make the Seurat object and process it
-###fast_tsne_path = '/home/ubuntu/FIt-SNE/bin/fast_tsne'
-###clusterData = function(toc,mDat=NULL,nPCs=100){
-###  srat = CreateSeuratObject(toc)
-###  srat = NormalizeData(srat)
-###  if(!is.null(mDat))
-###    srat = AddMetaData(srat,mDat)
-###  srat = FindVariableGenes(srat,do.plot=FALSE)
-###  srat = ScaleData(srat,genes.use=srat@var.genes)
-###  srat = RunPCA(srat,pcs.compute=nPCs,do.print=FALSE)
-###  srat = RunUMAP(srat,reduction.use='pca',dims.use=seq(nPCs))
-###  srat = RunTSNE(srat,reduction.use='pca',dims.use=seq(nPCs),tsne.method='FIt-SNE',nthreads=4,reduction.name='FItSNE',reduction.key='FItSNE_',fast_tsne_path=fast_tsne_path)
-###  srat = FindClusters(srat,reduction.type='pca',dims.use=seq(nPCs),resolution=1,print.output=FALSE)
-###  srat = AddMetaData(srat,data.frame(srat@dr$umap@cell.embeddings))
-###  srat = AddMetaData(srat,data.frame(srat@dr$FItSNE@cell.embeddings))
-###  srat@misc$markers = quickMarkers(srat@data,srats[[i]]@meta.data$res.1,N=Inf)
-###  #Calculate fraction of expression in each of the gene sets
-###  for(nom in names(geneSets)){
-###    m = match(geneSets[[nom]],gsub('___.*','',rownames(srat@data)))
-###    m = m[!is.na(m)]
-###    srat@meta.data[,nom] = colSums(srat@raw.data[rownames(srat@data)[m],])/colSums(srat@raw.data)
-###  }
-###  srat@scale.data=NULL
-###  return(srat)
-###}
-scl = sclReal
-nPCs = 30
-perplexity= 30
-if(forceRecalc | !file.exists(file.path(plotDir,'sratAdjusted.RDS'))){
-  mDat = cMani[as.integer(gsub('Channel([0-9]+)___.*','\\1',colnames(scl$atoc))),]
-  rownames(mDat) = colnames(scl$atoc)
-  srat = CreateSeuratObject(scl$atoc)
-  srat = NormalizeData(srat)
-  mDat = cMani[as.integer(gsub('Channel([0-9]+)___.*','\\1',colnames(srat@data))),]
-  rownames(mDat) = colnames(srat@data)
-  srat = AddMetaData(srat,mDat)
-  srat = FindVariableGenes(srat,do.plot=FALSE)
-  srat = ScaleData(srat)
-  srat = RunPCA(srat,pcs.compute=nPCs,do.print=FALSE,maxit=1000)
-  srat = RunTSNE(srat,dims.use=seq(nPCs),perplexity=perplexity)
-  srat = FindClusters(srat,dims.use=seq(nPCs),resolution=1,print.output=0,save.SNN=TRUE,plot.SNN=FALSE)
-  srat@scale.data=NULL
-  saveRDS(srat,file.path(plotDir,'sratAdjusted.RDS'))
-}
-#Make the Seurat object for the unedited  
-if(forceRecalc | !file.exists(file.path(plotDir,'sratSoggy.RDS'))){
-  srat = CreateSeuratObject(scl$toc)
-  srat = NormalizeData(srat)
-  mDat = cMani[as.integer(gsub('Channel([0-9]+)___.*','\\1',colnames(srat@data))),]
-  rownames(mDat) = colnames(srat@data)
-  srat = AddMetaData(srat,mDat)
-  srat = FindVariableGenes(srat,do.plot=FALSE)
-  srat = ScaleData(srat)
-  srat = RunPCA(srat,pcs.compute=nPCs,do.print=FALSE,maxit=1000)
-  srat = RunTSNE(srat,dims.use=seq(nPCs),perplexity=perplexity)
-  srat = FindClusters(srat,dims.use=seq(nPCs),resolution=1,print.output=0,save.SNN=TRUE,plot.SNN=FALSE)
-  srat@scale.data=NULL
-  saveRDS(srat,file.path(plotDir,'sratSoggy.RDS'))
-}
-#Finally, the Seurat object for the strained
-if(forceRecalc | !file.exists(file.path(plotDir,'sratStrained.RDS'))){
-  srat = createCleanedSeurat(scl)
-  mDat = cMani[as.integer(gsub('Channel([0-9]+)___.*','\\1',colnames(srat@data))),]
-  rownames(mDat) = colnames(srat@data)
-  srat = AddMetaData(srat,mDat)
-  srat = FindVariableGenes(srat,do.plot=FALSE)
-  srat = ScaleData(srat)
-  srat = RunPCA(srat,pcs.compute=nPCs,do.print=FALSE,maxit=1000)
-  srat = RunTSNE(srat,dims.use=seq(nPCs),perplexity=perplexity)
-  srat = FindClusters(srat,dims.use=seq(nPCs),resolution=1,print.output=0,save.SNN=TRUE,plot.SNN=FALSE)
-  srat@scale.data=NULL
-  saveRDS(srat,file.path(plotDir,'sratStrained.RDS'))
-}
-#Load the soggy and adjusted objects
-soggy = readRDS(file.path(plotDir,'sratSoggy.RDS'))
-adjusted = readRDS(file.path(plotDir,'sratAdjusted.RDS'))
-#Add the annotation for soggy
-annMap = c('0'='T',
-          '1'='CD8+ T',
-          '2'='MNP',
-          '3'='MNP',
-          '4'='MNP',
-          '5'='CD8+ T',
-          '6'='T',
-          '7'='ccRCC',
-          '8'='ccRCC',
-          '9'='Endothelium',
-          '10'='ccRCC',
-          '11'='CD8+ T',
-          '12'='NK',
-          '13'='Dead',
-          '14'='NK',
-          '15'='RBC',
-          '16'='?',
-          '17'='ccRCC',
-          '18'='T',
-          '19'='?',
-          '20'='MAST',
-          '21'='NK',
-          '22'='Wilms',
-          '23'='Fibroblasts',
-          '24'='Endothelium',
-          '25'='pRCC',
-          '26'='?',
-          '27'='Proliferating T',
-          '28'='B',
-          '29'='Fibroblasts',
-          '30'='Proliferating MNP',
-          '31'='Activated B',
-          '32'='?')
-
-######################
-#********************#
-#* Generate figures *#
-#********************#
-######################
-
-######################
-# Basic cluster plot #
-######################
-pdf(file.path(plotDir,'tsne_clusters.pdf'))
-TSNEPlot(soggy,do.label=TRUE,no.legend=TRUE)
-dev.off()
-soggy@meta.data$annotation = annMap[as.character(soggy@meta.data$res.1)]
-pdf(file.path(plotDir,'tsne_annotation.pdf'))
-TSNEPlot(soggy,group.by='annotation',do.label=TRUE,no.legend=TRUE)
-dev.off()
-
-
-##################################
-# Gene selection validation plot #
-##################################
-#Work out what the fraction of 
-isHuman = sclIdeal$hgCnts[colnames(sclIdeal$toc)] > sclIdeal$mmCnts[colnames(sclIdeal$toc)]
-isDoublet = pmin(sclIdeal$hgCnts[colnames(sclIdeal$toc)], sclIdeal$mmCnts[colnames(sclIdeal$toc)])>=1000
-#Get the fraction of markers that are human and mouse
-markFrac =  apply(sclIdeal$channels$mixture$unexpressedMatrix,2,function(e) c(sum(grepl('^hg19_',rownames(sclIdeal$channels$mixture$unexpressedMatrix))[e]),sum(grepl('mm10_',rownames(sclIdeal$channels$mixture$unexpressedMatrix))[e])))
-rownames(markFrac) = c('human','mouse')
-#Get fraction correct
-trueFrac = markFrac['human',]/colSums(markFrac)
-trueFrac[isHuman] = 1 -trueFrac[isHuman]
-#Drop doublets
-trueFrac = trueFrac[!isDoublet]
-nUMIs = sclIdeal$metaData[names(trueFrac),'nUMIs']
-#plot(log10(nUMIs),trueFrac)
-#Now look at the difference in inferred contamination
-df = sclIdeal$channels$mixture$rhoGroupedGold
-df$estCoal = sclIdeal$channels$mixture$rhoGrouped$est
-df$ratio = df$estCoal/df$est
-#Exclude doublets
-df = df[!(df$nUMIs %in% sclIdeal$metaData[names(isDoublet)[isDoublet],'nUMIs']),]
-#Plot the log ratio of estimated contamination
-gg_validation = ggplot(df,aes(log10(nUMIs),log10(ratio))) +
-  geom_hex(bins=100) +
-  geom_hline(yintercept=0,colour='red')
-#And the actual values
-df = melt(df[,c('est','estCoal','nUMIs')],id.vars=c('nUMIs'))
-gg_validation = ggplot(df,aes(log10(nUMIs),value,colour=variable)) +
-  geom_point(alpha=1/1)
-#Get the counts of the genes used to inspect
-inspectCounts = sclIdeal$toc[rownames(sclIdeal$channels$mixture$unexpressedMatrix),]
-#Get the ratios with limits in a sensible way
-getRatioWithLimits = function(scl,useCells=NULL,cellGroupings=NULL,tgtSoupCntsPerGroup=100){
-  if(is.null(useCells))
-    useCells=colnames(scl$toc)
-  #Get the estimation matricies for each condition
-  useToEstCoal = as.matrix(scl$unexpressedMatrix[,useCells])
-  useToEstGold = as.matrix(scl$unexpressedMatrixGold[,useCells])
-  #Determine a globally appropriate cell grouping if not supplied
-  if(is.null(cellGroupings)){
-    o = order(scl$metaData[useCells,'nUMIs'])
-    #The expected counts per cell
-    expCntsGold = colSums(useToEstGold*scl$soupProfile[rownames(useToEstGold),'est'])*scl$metaData[useCells,'nUMIs']
-    expCntsCoal = colSums(useToEstCoal*scl$soupProfile[rownames(useToEstCoal),'est'])*scl$metaData[useCells,'nUMIs']
-    expCnts = pmin(expCntsGold,expCntsCoal)
-    #Split groups so that the expected soup count is respected
-    cellGroupings = cut_interval(cumsum(expCnts[o]),length=tgtSoupCntsPerGroup)
-    #Reverse ordering
-    cellGroupings = cellGroupings[match(seq_along(o),o)]
-    #Drop empty levels
-    cellGroupings = factor(as.character(cellGroupings))
-  }
-  #Get total UMIs in each grouping (and global)
-  nUMIs = sapply(split(scl$metaData[useCells,'nUMIs'],cellGroupings),sum)
-  nUMIs['Global'] = sum(scl$metaData[useCells,'nUMIs'])
-  #Estimation
-  #Gold
-  obsSoupCntsGold = SoupX:::estRateLims(colSums(scl$toc[rownames(useToEstGold),useCells]*useToEstGold),scl$metaData[useCells,'nUMIs'])*scl$metaData[useCells,'nUMIs']
-  expSoupCntsGold = colSums(useToEstGold*scl$soupProfile[rownames(useToEstGold),'est'],na.rm=TRUE)*scl$metaData[useCells,'nUMIs']
-  globRhoGold = SoupX:::estGrouped(obsSoupCntsGold$est,expSoupCntsGold,scl$metaData[useCells,'nUMIs'],rep('Global',length(useCells)))
-  groupRhosGold = SoupX:::estGrouped(obsSoupCntsGold$est,expSoupCntsGold,scl$metaData[useCells,'nUMIs'],cellGroupings)
-  rhoGroupedGold = rbind(globRhoGold,groupRhosGold)
-  #Coal
-  obsSoupCntsCoal = SoupX:::estRateLims(colSums(scl$toc[rownames(useToEstCoal),useCells]*useToEstCoal),scl$metaData[useCells,'nUMIs'])*scl$metaData[useCells,'nUMIs']
-  expSoupCntsCoal = colSums(useToEstCoal*scl$soupProfile[rownames(useToEstCoal),'est'],na.rm=TRUE)*scl$metaData[useCells,'nUMIs']
-  globRhoCoal = SoupX:::estGrouped(obsSoupCntsCoal$est,expSoupCntsCoal,scl$metaData[useCells,'nUMIs'],rep('Global',length(useCells)))
-  groupRhosCoal = SoupX:::estGrouped(obsSoupCntsCoal$est,expSoupCntsCoal,scl$metaData[useCells,'nUMIs'],cellGroupings)
-  rhoGroupedCoal = rbind(globRhoCoal,groupRhosCoal)
-  #Compare across groups
-  rhoRatio = list()
-  for(i in seq(nrow(rhoGroupedGold))){
-    nn = nUMIs[rownames(rhoGroupedGold)[i]]
-    #Sample rho in gold
-    rhoGold = rbinom(1000,nn,rhoGroupedGold[i,'obsSoupCnts']/nn)/rhoGroupedGold[i,'expSoupCnts']
-    rhoCoal = rbinom(1000,nn,rhoGroupedCoal[i,'obsSoupCnts']/nn)/rhoGroupedCoal[i,'expSoupCnts']
-    rhoRatio[[rownames(rhoGroupedGold)[i]]] = rhoCoal/rhoGold
-  }
-  #Get median and confidence
-  df = sapply(lapply(rhoRatio,log2),quantile,c(0.025,0.5,0.975),na.rm=TRUE)
-  df = data.frame(est=df[2,],
-                  lower=df[1,],
-                  upper=df[3,],
-                  rhoGold = rhoGroupedGold$est,
-                  lowerGold = rhoGroupedGold$lower,
-                  upperGold = rhoGroupedGold$upper,
-                  rhoTest = rhoGroupedCoal$est,
-                  lowerTest = rhoGroupedCoal$lower,
-                  upperTest = rhoGroupedCoal$upper,
-                  row.names=rownames(rhoGroupedGold),
-                  nUMIs=rhoGroupedGold$nUMIs)
-  gg = ggplot(df,aes(log10(nUMIs),est)) +
-    geom_errorbar(aes(ymin=lower,ymax=upper),size=0.1) +
-    geom_hex(bins=100) +
-    geom_hline(yintercept=0,col='red',linetype=2)
-  return(gg)
-}
-plots = lapply(sclReal$channels,getRatioWithLimits)
-#Make a plot where the two are shown on an absolute scale
-df = lapply(plots,function(e) e$data)
-df = do.call(rbind,df)
-df$Channel = gsub('\\..*','',rownames(df))
-ddf = melt(df[,c('rhoGold','rhoTest','nUMIs','Channel')],id.vars=c('Channel','nUMIs'),value.name='rho')
-tmp = melt(df[,c('lowerGold','lowerTest','nUMIs','Channel')],id.vars=c('Channel','nUMIs'),value.name='rho')
-ddf$lower = tmp$rho
-tmp = melt(df[,c('upperGold','upperTest','nUMIs','Channel')],id.vars=c('Channel','nUMIs'),value.name='rho')
-ddf$upper = tmp$rho
-ddf$variable = ifelse(ddf$variable=='rhoGold',
-                      'Manual',
-                      'Automatic'
-                      )
-##Add the ideal to the real
-#tmp = sclIdeal$channels$mixture$rhoGroupedGold
-#m = match(tmp$nUMIs,sclIdeal$metaData[names(sclIdeal$isDoublet),'nUMIs'])
-#tmp = tmp[which(!sclIdeal$isDoublet[m]),]
-#ddf = rbind(ddf,data.frame(Channel='Discovery',nUMIs=tmp$nUMIs,variable='Manual',rho=tmp$est,lower=tmp$lower,upper=tmp$upper))
-#tmp = sclIdeal$channels$mixture$rhoGrouped
-#m = match(tmp$nUMIs,sclIdeal$metaData[names(sclIdeal$isDoublet),'nUMIs'])
-#tmp = tmp[which(!sclIdeal$isDoublet[m]),]
-#ddf = rbind(ddf,data.frame(Channel='Discovery',nUMIs=tmp$nUMIs,variable='Automatic',rho=tmp$est,lower=tmp$lower,upper=tmp$upper))
-gg_sel_all = ggplot(ddf,aes(log10(nUMIs),rho,colour=variable)) +
-  geom_point(size=0.1) +
-  geom_errorbar(aes(ymin=lower,ymax=upper)) + 
-  geom_smooth() + 
-  ylim(0,1) +
-  ylab('Contamination fraction') +
-  xlab('log10(nUMIs)') + 
-  labs(colour='Gene Selection Method') +
-  facet_wrap(~Channel)
-pdf(file.path(plotDir,'AllSelectionPlots.pdf'),width=14,height=14)
-plot(gg_sel_all)
-dev.off()
-png(file.path(plotDir,'AllSelectionPlots.png'),width=14,height=14,units = 'in',res=rasterRes)
-plot(gg_sel_all)
-dev.off()
-#Same but just for the ideal
-tmp = sclIdeal$channels$mixture$rhoGroupedGold
-m = match(tmp$nUMIs,sclIdeal$metaData[names(sclIdeal$isDoublet),'nUMIs'])
-tmp = tmp[which(!sclIdeal$isDoublet[m]),]
-ddf = data.frame(Channel='Discovery',nUMIs=tmp$nUMIs,variable='Manual',rho=tmp$est,lower=tmp$lower,upper=tmp$upper)
-tmp = sclIdeal$channels$mixture$rhoGrouped
-m = match(tmp$nUMIs,sclIdeal$metaData[names(sclIdeal$isDoublet),'nUMIs'])
-tmp = tmp[which(!sclIdeal$isDoublet[m]),]
-ddf = rbind(ddf,data.frame(Channel='Discovery',nUMIs=tmp$nUMIs,variable='Automatic',rho=tmp$est,lower=tmp$lower,upper=tmp$upper))
-gg_sel_all = ggplot(ddf,aes(log10(nUMIs),rho,colour=variable)) +
-  geom_point(size=0.1) +
-  geom_errorbar(aes(ymin=lower,ymax=upper)) + 
-  geom_smooth() + 
-  ylim(0,1) +
-  ylab('Contamination fraction') +
-  xlab('log10(nUMIs)') + 
-  labs(colour='Gene Selection Method')
-pdf(file.path(plotDir,'IdealSelectionPlots.pdf'),width=14,height=14)
-plot(gg_sel_all)
-dev.off()
-png(file.path(plotDir,'IdealSelectionPlots.png'),width=14,height=14,units='in',res=rasterRes)
-plot(gg_sel_all)
-dev.off()
-
-################
-# Lobster plot #
-################
-df = data.frame(hg=sclIdeal$hgCnts,mm=sclIdeal$mmCnts,isCell=colnames(sclIdeal$tod) %in% colnames(sclIdeal$toc))
-#df = data.frame(hg=hg_umiCounts,mm=mm_umiCounts,qval=qval)
-df$M = log10(0.5*(df$hg+df$mm))
-df$A = log10(df$hg/df$mm)
-ext = ceiling(1.01*max(abs(df$A[is.finite(df$A)])))
-df$A[df$A == -Inf] = -ext
-df$A[df$A == Inf] = ext
-#Pick out the doublets
-df$isDoublet = pmin(df$hg,df$mm)>=1000
-#Drop the doublets
-df = df[!df$isDoublet,]
-#Estimate global rho for two populations
-w = which(df$isCell & !df$isDoublet & df$hg>df$mm)
-rho_hg = (sum(df[w,'mm'])/sum(df[w,c('hg','mm')]))/sum(sclIdeal$soupMatrix[grep('^mm10_',rownames(sclIdeal$soupMatrix))])
-w = which(df$isCell & !df$isDoublet & df$hg<df$mm)
-rho_mm = (sum(df[w,'hg'])/sum(df[w,c('hg','mm')]))/sum(sclIdeal$soupMatrix[grep('^hg19_',rownames(sclIdeal$soupMatrix))])
-#Make the plot
-gg_lobster = ggplot(df,aes(M,A,colour=isCell)) +
-  geom_point(size=1.0) +
-  #geom_hline(yintercept=c(-log10(rho_hg/2),log10(rho_mm/2))) +
-  labs(colour='Is a cell?') +
-  xlab('log10(Average UMIs)') +
-  ylab('log10(Human UMIs/Mouse UMIs)') +
-  scale_colour_manual(values=colPal[1:2]) +
-  guides(colour=FALSE) + 
-  theme_bw(base_size=18)
-pdf(file.path(plotDir,'lobster.pdf'))
-plot(gg_lobster)
-dev.off()
-png(file.path(plotDir,'lobster.png'),width=7,height=7,units='in',res=rasterRes)
-plot(gg_lobster)
-dev.off()
-
-
-##################################
-# Soup/Cell correlation in ideal #
-##################################
-#Get just the human counts in human cells and mouse counts in mouse cells
-dat = sclIdeal$toc
-isHuman = sclIdeal$hgCnts[colnames(dat)] > sclIdeal$mmCnts[colnames(dat)]
-isDoublet = pmin(sclIdeal$hgCnts[colnames(dat)], sclIdeal$mmCnts[colnames(dat)])>=1000
-hgSoup = sclIdeal$soupMatrix[grep('^hg19_',rownames(sclIdeal$soupMatrix))]
-mmSoup = sclIdeal$soupMatrix[grep('^mm10_',rownames(sclIdeal$soupMatrix))]
-#dat = ideal[,idealCells]
-#isHuman = hgCnts[idealCells]>mmCnts[idealCells]
-#isDoublet = pmin(hgCnts[idealCells],mmCnts[idealCells])>=1000
-hgCell = (dat[grep('^hg19_',rownames(dat)),isHuman & !isDoublet])
-hgCell = Matrix::rowSums(hgCell)/sum(hgCell)
-#hgSoup = idealSoup$est[grep('hg',rownames(idealSoup))]
-hgSoup = hgSoup/sum(hgSoup)
-mmCell = (dat[grep('^mm10_',rownames(dat)),!isHuman & !isDoublet])
-mmCell = Matrix::rowSums(mmCell)/sum(mmCell)
-#mmSoup = idealSoup$est[grep('mm',rownames(idealSoup))]
-mmSoup = mmSoup/sum(mmSoup)
-df = data.frame(cellFrac = c(hgCell,mmCell),
-                soupFrac = c(hgSoup,mmSoup),
-                species = rep(c('human','mouse'),c(length(hgCell),length(mmCell)))
-                )
-labs = c(sprintf('R^2 == %.02f (Human)',cor(hgCell,hgSoup)),
-         sprintf('R^2 == %.02f (Mouse)',cor(mmCell,mmSoup)))
-#Just a straight correlation plot
-gg_idealCor = ggplot(df,aes(log10(cellFrac),log10(soupFrac))) +
-  geom_point(aes(colour=species),size=1.0,alpha=1) +
-  geom_abline(intercept=0,slope=1) +
-  annotate('text',x=-6,y=-2,label= labs[1],parse=TRUE) +
-  annotate('text',x=-6,y=-2.3,label= labs[2],parse=TRUE) +
-  xlab('log10(cell expression)') +
-  ylab('log10(soup expression)') +
-  scale_colour_manual(values=colPal[1:2]) + 
-  guides(colour=FALSE) +
-  theme_bw(base_size=18)
-#The MA plot instead 
-#gg_idealCor = ggplot(df,aes(log10(0.5*(cellFrac+soupFrac)),log10(cellFrac/soupFrac))) +
-#  geom_point(aes(colour=species)) +
-#  geom_hline(yintercept=0) +
-#  annotate('text',x=-2,y=-2,label= labs[1],parse=TRUE) +
-#  annotate('text',x=-2,y=-2.3,label= labs[2],parse=TRUE) +
-#  xlab('log10(Average expression)') +
-#  ylab('log10(cell/soup)') +
-#  xlim(-6,NA) +
-#  guides(colour=FALSE) +
-#  theme_bw(base_size=18)
-#  #ggtitle(sprintf('Gene correlation between cell and soup\n R=%g,%g for human,mouse',cor(hgCell,hgSoup),cor(mmCell,mmSoup)))
-pdf(file.path(plotDir,'idealCorrelation.pdf'))
-plot(gg_idealCor)
-dev.off()
-png(file.path(plotDir,'idealCorrelation.png'),width=7,height=7,units='in',res=rasterRes)
-plot(gg_idealCor)
-dev.off()
-
-
-#####################################
-# Correlation for non-ideal samples #
-#####################################
-df = list()
-for(i in seq_along(scl$channels)){
-  #Get the soup expression profile
-  df[[i]] = data.frame(Cells = rowSums(scl$channels[[i]]$toc)/sum(scl$channels[[i]]$metaData[colnames(scl$channels[[i]]$toc),'nUMIs']),
-                       Soup = scl$soupMatrix[,i],
-                       Sample = cMani$Label[i],
-                       ShortName = simpNames[cMani$Label[i]]
-                       )
-  #Get the correlation co-efficient
-  df[[i]]$Label = sprintf('%s (%.02f)',df[[i]]$ShortName,cor(df[[i]]$Cells,df[[i]]$Soup))
-}
-df = do.call(rbind,df)
-#Create the plot
-gg_cor = ggplot(df,aes(log10(Cells),log10(Soup))) +
-  geom_abline(intercept=0,slope=1) +
-  geom_point(size=0.5,alpha=1/2) +
-  facet_wrap(~Label)
-pdf(file.path(plotDir,'allCorrelations.pdf'),width=14,height=14)
-plot(gg_cor)
-dev.off()
-png(file.path(plotDir,'allCorrelations.png'),width=14,height=14,units='in',res=rasterRes)
-plot(gg_cor)
-dev.off()
-
-
-#########################################
-# Optimal droplets for soup calculation #
-#########################################
-#Define "true background"
-dat = sclIdeal$toc
-isHuman = sclIdeal$hgCnts[colnames(dat)] > sclIdeal$mmCnts[colnames(dat)]
-isDoublet = pmin(sclIdeal$hgCnts[colnames(dat)], sclIdeal$mmCnts[colnames(dat)])>=1000
-hgBG = rowSums(dat[grep('mm10_',rownames(dat)),isHuman & !isDoublet & sclIdeal$metaData[colnames(sclIdeal$toc),'nUMIs'] > 1000])
-hgBG = hgBG/sum(hgBG)
-mmBG = rowSums(dat[grep('hg19_',rownames(dat)),!isHuman & !isDoublet & sclIdeal$metaData[colnames(sclIdeal$toc),'nUMIs'] > 1000])
-mmBG = mmBG/sum(mmBG)
-#Now calculate soup in each bin from 0 to 100
-out=list()
-for(i in seq(100)){
-  w = which(sclIdeal$metaData$nUMIs==i)
-  hgSoup = rowSums(sclIdeal$tod[grep('^mm10_',rownames(dat)),w])
-  hgSoup = hgSoup/sum(hgSoup)
-  mmSoup = rowSums(sclIdeal$tod[grep('^hg19_',rownames(dat)),w])
-  mmSoup = mmSoup/sum(mmSoup)
-  out[[i]] = data.frame(nUMIs=i,
-                        cor = c(cor(hgSoup,hgBG),cor(mmSoup,mmBG)),
-                        species = c('human','mouse')
-                        )
-}
-out = do.call(rbind,out)
-gg = ggplot(out,aes(nUMIs,cor,colour=species)) +
-  geom_point() +
-  scale_colour_manual(values=colPal[1:2]) +
-  xlab('Droplet UMI count') +
-  ylab('Correlation with true contamination')
-pdf(file.path(plotDir,'OptimalSoupDroplets.pdf'))
-plot(gg)
-dev.off()
-png(file.path(plotDir,'OptimalSoupDroplets.png'),width=7,height=7,units='in',res=rasterRes)
-plot(gg)
-dev.off()
-
-
-
-#################################
-# Soup comparison between cells #
-#################################
-dat = sclIdeal$toc
-isHuman = sclIdeal$hgCnts[colnames(dat)] > sclIdeal$mmCnts[colnames(dat)]
-isDoublet = pmin(sclIdeal$hgCnts[colnames(dat)], sclIdeal$mmCnts[colnames(dat)])>=1000
-hgSoup = sclIdeal$soupMatrix[grep('^hg19_',rownames(sclIdeal$soupMatrix))]
-mmSoup = sclIdeal$soupMatrix[grep('^mm10_',rownames(sclIdeal$soupMatrix))]
-hgSoup = hgSoup/sum(hgSoup)
-mmSoup = mmSoup/sum(mmSoup)
-#Get correlation to soup in bins of cells
-hgCellSoups = dat[grep('mm10_',rownames(dat)),isHuman & !isDoublet]
-nCnts = Matrix::colSums(hgCellSoups)
-o = order(nCnts)
-hgCellSoups = hgCellSoups[,o]
-nCnts = nCnts[o]
-#Split into bins of roughly 1000 reads.
-w = cut_interval(cumsum(nCnts),length=1000)
-hgSoupCor = sapply(levels(w),function(e) cor(mmSoup,Matrix::rowSums(hgCellSoups[,w==e,drop=FALSE])/sum(hgCellSoups[,w==e])))
-hgSoupCnts = sapply(split(nCnts,w),sum)
-df = data.frame(Counts=hgSoupCnts,
-                Correlation = hgSoupCor,
-                Species='Human')
-#Repeat for mouse
-mmCellSoups = dat[grep('hg19_',rownames(dat)),!isHuman & !isDoublet]
-nCnts = Matrix::colSums(mmCellSoups)
-o = order(nCnts)
-mmCellSoups = mmCellSoups[,o]
-nCnts = nCnts[o]
-#Split into bins of roughly 1000 reads.
-w = cut_interval(cumsum(nCnts),length=1000)
-mmSoupCor = sapply(levels(w),function(e) cor(hgSoup,Matrix::rowSums(mmCellSoups[,w==e,drop=FALSE])/sum(mmCellSoups[,w==e])))
-mmSoupCnts = sapply(split(nCnts,w),sum)
-df = rbind(df,
-           data.frame(Counts=mmSoupCnts,
-                Correlation = mmSoupCor,
-                Species='Mouse')
-           )
-gg_cellsoup = ggplot(df,aes(Counts,Correlation)) +
-  geom_point(aes(colour=Species)) +
-  scale_colour_manual(values=colPal[1:2]) +
-  xlab('Cell counts') +
-  ylab('Correlation with soup') +
-  ylim(0,1)
-pdf(file.path(plotDir,'cellSoupComparison.pdf'))
-plot(gg_cellsoup)
-dev.off()
-png(file.path(plotDir,'cellSoupComparison.png'),width=7,height=7,units='in',res=rasterRes)
-plot(gg_cellsoup)
-dev.off()
-
-
-
-############################
-# Spot the difference tSNE #
-############################
-# Make a spot the difference tSNE
-df = soggy@meta.data
-df$tSNE1 = soggy@dr$tsne@cell.embeddings[rownames(df),1]
-df$tSNE2 = soggy@dr$tsne@cell.embeddings[rownames(df),2]
-df$soup = 'Contaminated'
-alt = adjusted@meta.data
-alt$annotation = df$annotation
-alt$tSNE1 = adjusted@dr$tsne@cell.embeddings[rownames(df),1]
-alt$tSNE2 = adjusted@dr$tsne@cell.embeddings[rownames(df),2]
-alt$soup = 'Cleaned'
-df = rbind(df,alt[,colnames(df)])
-#Adjust labels to emphasise different experiments and biological reps
-df$labs = superSimpNames[df$Label]
-#Set order of panels
-df$soup = factor(df$soup,levels=c('Contaminated','Cleaned'))
-gg_std = ggplot(df,aes(tSNE1,tSNE2,colour=labs)) +
-  geom_point(size=0.3,alpha=1/2) +
-  scale_colour_manual(values=colPalLarge) +
-  labs(colour='Sample') + 
-  guides(colour = guide_legend(override.aes = list(size=3,alpha=1))) +
-  facet_grid(~soup)
-pdf(file.path(plotDir,'spotTheDifference.pdf'),width=14)
-plot(gg_std)
-dev.off()
-png(file.path(plotDir,'spotTheDifference.png'),width=14,height=7,units='in',res=rasterRes)
-plot(gg_std)
-dev.off()
-
-
-############################
-# Batch comparison heatmap #
-############################
-mats = list()
-for(srat in list(soggy,adjusted)){
-  #Get all channels
-  channels = unique(srat@meta.data$Label)
-  #Make a cluster membership matrix
-  membTab = sapply(lapply(split(srat@meta.data$Label,srat@meta.data$res.1),unique),ltable,levels=channels)
-  out = list()
-  for(channel in channels){
-    ngbFrac = rowSums(membTab[,srat@meta.data$res.1[srat@meta.data$Label==channel]])
-    #Clean up names
-    names(ngbFrac) = simpNames[names(ngbFrac)]
-    out[[simpNames[channel]]] = ngbFrac/sum(srat@meta.data$Label==channel)
-  }
-  mats[[length(mats)+1]] = do.call(rbind,out)
-}
-names(mats) = c('Contamintaed','Cleaned')
-#Define groups to group by
-groups = ifelse(grepl('Wilms',rownames(mats[[1]])),
-                'Wilms',
-                ifelse(grepl('pRCC',rownames(mats[[1]])),
-                       'pRCC',
-                       'ccRCC'
-                       )
-                )
-groups = factor(groups,levels=c('Wilms','ccRCC','pRCC'))
-htList = Heatmap(mats[[1]],
-        #column_title='Contaminated',
-        row_names_side='left',
-        show_heatmap_legend=FALSE,
-        row_split = groups,
-        row_gap = unit(2,'mm'),
-        column_gap = unit(2,'mm'),
-        column_split = groups,
-        show_row_names = FALSE,
-        show_column_names = FALSE,
-        cluster_row=FALSE,
-        cluster_col=FALSE) +
-  Heatmap(mats[[2]],
-          name='Membership\nFraction',
-          show_row_names=FALSE,
-          #column_title='Cleaned',
-          row_split = groups,
-          column_split = groups,
-          row_gap = unit(2,'mm'),
-          column_gap = unit(2,'mm'),
-          show_column_names = FALSE,
-          cluster_row=FALSE,
-          cluster_col=FALSE)
-pdf(file.path(plotDir,'batchComparison.pdf'),width=14,height=7)
-draw(htList,
-     column_title='Target Sample',
-     row_title='Source Sample',
-     gap = unit(2,'cm'),
-     column_title_side='bottom')
-dev.off()
-png(file.path(plotDir,'batchComparison.png'),width=14,height=7,units='in',res=rasterRes)
-draw(htList,
-     column_title='Target Sample',
-     row_title='Source Sample',
-     gap = unit(2,'cm'),
-     column_title_side='bottom')
-dev.off()
-
-
-
-######################
-# MT frac comparison #
-######################
-mtSoggy = Matrix::colSums(exp(soggy@data[grep('^MT-.*',rownames(soggy@data)),])-1)/1e4
-mtClean = Matrix::colSums(exp(adjusted@data[grep('^MT-.*',rownames(adjusted@data)),])-1)/1e4
-df = data.frame(clean=mtClean,soggy=mtSoggy)
-df$M = log(df$clean/df$soggy)
-df$A = df$soggy
-gg_mtComp = ggplot(df[df$clean<0.2 | df$soggy<0.2,],aes(soggy,clean-soggy)) +
-  geom_point(size=0.5,alpha=1/2) +
-  xlab('Contaminated MT frac') +
-  ylab('Clean MT - Contaminated MT')
-pdf(file.path(plotDir,'MTChange.pdf'))
-plot(gg_mtComp)
-dev.off()
-png(file.path(plotDir,'MTChange.png'),width=7,height=7,units='in',res=rasterRes)
-plot(gg_mtComp)
-dev.off()
-
-
-##################################
-# Ideal data marker gene changes #
-##################################
-isHuman = sclIdeal$hgCnts[colnames(sclIdeal$toc)] > sclIdeal$mmCnts[colnames(sclIdeal$toc)]
-isDoublet = pmin(sclIdeal$hgCnts[colnames(sclIdeal$toc)], sclIdeal$mmCnts[colnames(sclIdeal$toc)])>=1000
-#Get the fraction of contamination from mouse in human
-w = which(isHuman & !isDoublet)
-#Looking in human cells
-fracKeptBadHg = colSums(sclIdeal$atoc[grep('^mm10_',rownames(sclIdeal$atoc)),w])/colSums(sclIdeal$toc[grep('^mm10_',rownames(sclIdeal$toc)),w])
-fracKeptGoodHg = colSums(sclIdeal$atoc[grep('^hg19_',rownames(sclIdeal$atoc)),w])/colSums(sclIdeal$toc[grep('^hg19_',rownames(sclIdeal$toc)),w])
-#Looking in mouse cells
-w = which(!isHuman & !isDoublet)
-fracKeptBadMm = colSums(sclIdeal$atoc[grep('^hg19_',rownames(sclIdeal$atoc)),w])/colSums(sclIdeal$toc[grep('^hg19_',rownames(sclIdeal$toc)),w])
-fracKeptGoodMm = colSums(sclIdeal$atoc[grep('^mm10_',rownames(sclIdeal$atoc)),w])/colSums(sclIdeal$toc[grep('^mm10_',rownames(sclIdeal$toc)),w])
-#Convert to data frame 
-df = data.frame(species = rep(c('Human','Mouse'),2*c(length(fracKeptBadHg),length(fracKeptBadMm))),
-                moleculeType = rep(c('Contamination','Cellular','Contamination','Cellular'),c(length(fracKeptBadHg),length(fracKeptGoodHg),length(fracKeptBadMm),length(fracKeptGoodMm))),
-                fracRetained = c((fracKeptBadHg),(fracKeptGoodHg),(fracKeptBadMm),(fracKeptGoodMm))
-                )
-#Set some ordering
-df$moleculeType = factor(df$moleculeType,levels=c('Contamination','Cellular'))
-df$species = factor(df$species,levels=c('Human','Mouse'))
-#Make the plot
-gg = ggplot(df,aes(moleculeType,fracRetained)) +
-  geom_boxplot(aes(fill=species)) +
-  scale_fill_manual(values=colPal[1:2]) +
-  #guides(fill=FALSE) +
-  xlab('mRNA Type') +
-  ylab('Fraction retained counts after correction')
-pdf(file.path(plotDir,'IdealCorrectionComparison.pdf'),width=4)
-plot(gg)
-dev.off()
-png(file.path(plotDir,'IdealCorrectionComparison.png'),width=4,height=7,units='in',res=rasterRes)
-plot(gg)
-dev.off()
-
-
-
-##################################
-# Real data marker gene changes  #
-##################################
-cl = quickMarkers(soggy@data,soggy@meta.data$res.1,N=10)
-#Get the fractional change for the markers that we care about
-s = split(rownames(soggy@meta.data),soggy@meta.data$res.1)
-fracChange = lapply(s,function(e){
-                    a = rowSums(soggy@data[cl$gene,e,drop=FALSE]>0)
-                    b = rowSums(adjusted@data[cl$gene,e,drop=FALSE]>0)
-                    b/a
-                })
-fracChange = do.call(cbind,fracChange)
-#Get only the "diagonal" entries
-ww = cbind(match(cl$gene,rownames(fracChange)),match(cl$cluster,colnames(fracChange)))
-cl$fracAfter = cl$geneFrequency * fracChange[ww]
-df = melt(cl[,c(1,2,3,ncol(cl))],id.vars=c('gene','cluster'))
-colnames(df)[3] = 'condition'
-df$condition = ifelse(df$condition=='geneFrequency','Contaminated','Cleaned')
-df$condition = factor(df$condition,levels=c('Contaminated','Cleaned'))
-#Colour by the fraction by which they go down
-mark = paste0(df$gene,'___',df$cluster)
-tmp = sapply(split(df,mark),function(e) {
-             a = e$value[e$condition=='Contaminated']
-             b = e$value[e$condition=='Cleaned']
-             (a-b)/a})
-df$fracChange = tmp[mark]
-#Dot and line alternative to heatmap
-gg = ggplot(df,aes(condition,value,colour=fracChange>0.5)) +
-  geom_point() +
-  geom_line(aes(group=gene,colour=fracChange>0.5)) +
-  xlab('')+
-  ylab('Expression Fraction') +
-  ylim(0,1) +
-  guides(colour=FALSE) +
-  scale_colour_manual(values=c('TRUE'=colPal[1],'FALSE'='black')) +
-  facet_wrap(~cluster)
-#Add label for those that change a lot
-adf = df[df$condition=='Cleaned',]
-gg = gg + geom_text_repel(data=adf,aes(label=gene,x=as.numeric(condition)+0.05,colour=fracChange>0.5),hjust=0,direction='y',max.iter=10000,min.segment.length=Inf,force=1)
-pdf(file.path(plotDir,'ClusterChanges.pdf'),width=28,height=28)
-plot(gg)
-dev.off()
-png(file.path(plotDir,'ClusterChanges.png'),width=28,height=28,units='in',res=rasterRes)
-plot(gg)
-dev.off()
+makePlots(file.path(plotDir,'Tumour_ann'),doPlot,splitRaster=FALSE,width=4.5,height=4.5,pointsize=8)
 #############################
-# Just the ones that change
-keepClusts = unique(df$cluster[df$fracChange>0.5])
-df = df[df$cluster %in% keepClusts,]
-df$clustNom = annMap[df$cluster]
-gg = ggplot(df,aes(condition,value,colour=fracChange>0.5)) +
-  geom_point() +
-  geom_line(aes(group=gene,colour=fracChange>0.5)) +
-  xlab('')+
-  ylab('Expression Fraction') +
-  ylim(0,1) +
-  guides(colour=FALSE) +
-  scale_colour_manual(values=c('TRUE'=colPal[1],'FALSE'='black')) +
-  facet_wrap(~clustNom,ncol=4)
-#Add label for those that change a lot
-adf = df[df$condition=='Cleaned' & df$fracChange>0.5,]
-#Manually tweak position for the main figure
-adf$value[adf$clustNom=='Dead' & adf$gene=='DEFA3']=0.05
-adf$value[adf$clustNom=='Dead' & adf$gene=='HBA1']=0.08
-adf$value[adf$clustNom=='Dead' & adf$gene=='HBD']=0.11
-adf$value[adf$clustNom=='MNP' & adf$gene=='SAA1']=0.06
-adf$value[adf$clustNom=='NK' & adf$gene=='COL3A1']=0.03
-adf$value[adf$clustNom=='NK' & adf$gene=='CTGF']=0.06
-adf$value[adf$clustNom=='NK' & adf$gene=='CPXM1']=0.09
-adf$value[adf$clustNom=='NK' & adf$gene=='COL1A1']=0.12
-adf$value[adf$clustNom=='NK' & adf$gene=='COL1A2']=0.15
-adf$value[adf$clustNom=='NK' & adf$gene=='TPSAB1']=0.18
-adf$value[adf$clustNom=='NK' & adf$gene=='MYL9']=0.21
-adf$value[adf$clustNom=='NK' & adf$gene=='RNASE1']=0.24
-gg = gg + geom_text(data=adf,aes(label=gene,x=as.numeric(condition)+0.05,colour=fracChange>0.5),hjust=0)
-pdf(file.path(plotDir,'ClusterChangesNegative.pdf'),width=14,height=7)
-plot(gg)
-dev.off()
-png(file.path(plotDir,'ClusterChangesNegative.png'),width=14,height=7,units='in',res=rasterRes)
-plot(gg)
-dev.off()
-
-
-##############################################
-# Contamination fraction estimate by channel #
-##############################################
-nUMIs = sclReal$metaData[sclReal$metaData$isCell,'nUMIs']
-fac = cut(nUMIs,50)
-cellGroupings = split(fac,sclReal$metaData$channelName[sclReal$metaData$isCell])
-tmp = sclReal
-for(nom in names(tmp$channels)){
-  tmp$channels[[nom]]$candidateNonExpressedGenes$isCandidate = rownames(tmp$channels[[nom]]$candidateNonExpressedGenes) %in% rownames(tmp$channels[[nom]]$unexpressedMatrix)
+# Compare cluster membership
+#Get shared cluster IDs
+clust = data.frame(barcode = rownames(cleaned@meta.data),
+                   goodClust = as.character(cleaned@meta.data$seurat_clusters),
+                   badClust = as.character(dirty@meta.data[rownames(cleaned@meta.data),'seurat_clusters']),
+                   stringsAsFactors=TRUE)
+tt = aggregate(goodClust ~ badClust,FUN=table,data=clust)
+#Number moved
+rowSums(tt$goodClust)-apply(tt$goodClust,1,max)
+#Make a heatmap of the move, normalised to fraction of source cell
+nMap = tt$goodClust[order(as.numeric(as.character(tt$badClust))),]
+rownames(nMap) = paste0('dirtyCluster',as.character(tt$badClust)[order(as.numeric(as.character(tt$badClust)))])
+nMap = nMap[,order(as.numeric(colnames(nMap)))]
+colnames(nMap) = paste0('cleanCluster',colnames(nMap))
+#Save a count version
+clMap = nMap
+#Normalise it
+nMap = nMap/rowSums(nMap)
+#Make the heatmap
+col = c('#ffffff','#f0f0f0','#d9d9d9','#bdbdbd','#969696','#737373','#525252','#252525','#000000')
+col = circlize::colorRamp2(seq(0,1,length.out=length(col)),col)
+hm = Heatmap(nMap[seq(nrow(nMap),1),],
+             col = col,
+             name = 'Intersection',
+             cluster_rows=FALSE,
+             cluster_columns=FALSE,
+             row_title='Uncorrected Clusters',
+             row_title_side = 'left',
+             row_names_side = 'left',
+             column_title='Corrected Clusters',
+             column_title_side='bottom',
+             row_labels = rev(gsub('.*Cluster','',rownames(nMap))),
+             column_labels = gsub('.*Cluster','',colnames(nMap)),
+             row_title_gp = gpar(fontsize=8),
+             row_names_gp = gpar(fontsize=8),
+             column_title_gp = gpar(fontsize=8),
+             column_names_gp = gpar(fontsize=8),
+             heatmap_legend_param = list(title_gp = gpar(fontsize=8),
+                                         labels_gp = gpar(fontsize=8))
+             )
+doPlot = function(e) {print(hm)}
+makePlots(file.path(plotDir,'Tumour_clusterChange'),doPlot,splitRaster=FALSE,width=4.5,height=4.0,pointsize=8)
+##############################################################################
+# Show that on average cleaning up soup increases the logFC between clusters.
+#Full cross-mapping list
+cMap = apply(clMap,1,function(e) colnames(clMap)[e>0])
+#Use the good clustering the default one in both maps
+cleaned@meta.data$cMap = cleaned@meta.data$seurat_clusters
+dirty@meta.data$cMap = cleaned@meta.data[rownames(dirty@meta.data),'seurat_clusters']
+dirty = SetIdent(dirty,rownames(dirty@meta.data),dirty@meta.data$cMap)
+####Split them into those that have 1-1 correspondent and those that don't
+###badToGood = data.frame(badClust = rownames(nMap),
+###                       goodClust = colnames(nMap)[apply(nMap,1,which.max)],
+###                       mapFrac = apply(nMap,1,max))
+###compMap = list(c0=c('d0'),
+###               c1=c('d2','d5'),
+###               c2=c('d3'),
+###               c3=c('d4','d35'),
+###               c4=c('d7'),
+###               c5=c('d13'),
+###               c6=c('d9'),
+###               c7=c('d6'),
+###               c8=c('d10'),
+###               c9=c('d11'),
+###               d1=c('c10','c14'),
+###               c11=c('d12'),
+###               c12=c('d18','d19'),
+###               c13=c('d14'),
+###               d8=c('c15','c24'),
+###               c16=c('d15'),
+###               c17=c('d22','d30'),
+###               c18=c('d17'),
+###               c19=c('d20'),
+###               c20=c('d25'),
+###               c21=c('d16'),
+###               c22=c('d28'),
+###               c23=c('d23'),
+###               c25=c('d21'),
+###               c26=c('d24'),
+###               c27=c('d26'),
+###               c28=c('d27'),
+###               c29=c('d32','d34'),
+###               c30=c('d29'),
+###               c31=c('d31'),
+###               c32=c('d33'),
+###               c33=c(),
+###               c34=c('d36')
+###               )
+####Make each of these into a connonical cluster
+###cleanToGold = paste0('c',levels(cleaned@active.ident))
+###m = match(cleanToGold,names(compMap))
+###m[is.na(m)] = rep(seq_along(compMap),lengths(compMap))[match(cleanToGold[is.na(m)],unlist(compMap))]
+###cleanToGold = setNames(paste0('g',m),cleanToGold)
+###dirtyToGold = paste0('d',levels(dirty@active.ident))
+###m = match(dirtyToGold,names(compMap))
+###m[is.na(m)] = rep(seq_along(compMap),lengths(compMap))[match(dirtyToGold[is.na(m)],unlist(compMap))]
+###dirtyToGold = setNames(paste0('g',m),dirtyToGold)
+###good = SetIdent(cleaned,rownames(cleaned@meta.data),cleanToGold[paste0('c',as.character(cleaned@meta.data$seurat_clusters))])
+###bad = SetIdent(dirty,rownames(dirty@meta.data),dirtyToGold[paste0('d',as.character(dirty@meta.data$seurat_clusters))])
+#Get markers and compare
+tgtFile=file.path(plotDir,'Tumour_clusterMarkers.RDS')
+if(!file.exists(tgtFile)){
+  gMarks = FindAllMarkers(cleaned)
+  bMarks = FindAllMarkers(dirty)
+  saveRDS(list(gMarks=gMarks,bMarks=bMarks),tgtFile)
+}else{
+  tmp = readRDS(tgtFile)
+  bMarks = tmp$bMarks
+  gMarks = tmp$gMarks
 }
-tmp = calculateContaminationFraction(tmp,cellGroupings=cellGroupings)
-#Get a big data.frame
-df = lapply(tmp$channels,function(e) e$rhoGrouped)
-df = cbind(do.call(rbind,df),Channel = rep(names(df),sapply(df,nrow)))
-df$Sample = simpNames[cMani$Label[as.integer(gsub('Channel','',df$Channel))]]
-#Add the ideal samples
-tmp = sclIdeal$channels$mixture$rhoGrouped
-tmp$Channel = 'mixture'
-tmp$Sample = 'Ideal'
-#Drop doublets
-m = match(sclIdeal$metaData[names(sclIdeal$isDoublet)[sclIdeal$isDoublet],'nUMIs'],tmp$nUMIs)
-tmp = tmp[-m,]
-df = rbind(df,tmp)
-#Make the plot
-globs = df[grep('Global',rownames(df)),]
-#Grouped
-groups = df[-grep('Global',rownames(df)),]
-gg = ggplot(groups,aes(log10(nUMIs),log10(est))) +
-  geom_hline(data=globs,aes(yintercept = log10(est)),linetype=1,colour='red',size=0.1) +
-  geom_hline(data=globs,aes(yintercept = log10(upper)),linetype=2,colour='red',size=0.1) +
-  geom_hline(data=globs,aes(yintercept = log10(lower)),linetype=2,colour='red',size=0.1) +
-  #geom_hex(bins=20) +
-  geom_point(size=0.5) +
-  geom_line(size=0.5) +
-  geom_errorbar(aes(ymin=log10(lower),ymax=log10(upper)),size=0.5) +
- ylab('Contamination Fraction') +
-  xlab('log10(nUMIs/cell') +
-  ylim(-3,0) +
-  facet_wrap(~Sample)
-pdf(file.path(plotDir,'AllContaminationPlots.pdf'),width=14,height=14)
-plot(gg)
-dev.off()
-png(file.path(plotDir,'AllContaminationPlots.png'),width=14,height=14,units='in',res=rasterRes)
-plot(gg)
-dev.off()
-
-
-#######################
-# Ideal Contamination #
-#######################
-#Get the per-cell contamination
-sc = sclIdeal$channels$mixture
-sc = calculateContaminationFraction(sc,cellGroupings=factor(seq(ncol(sc$toc))))
-df = sc$rhoGrouped[-1,]
-rownames(df) = colnames(sc$toc)
-df$isHuman = sclIdeal$isHuman
-df$isDoublet = sclIdeal$isDoublet
-df$Species = ifelse(df$isHuman,'Human','Mouse')
-df$nUMIs = sc$metaData[rownames(df),'nUMIs']
-df = df[!df$isDoublet,]
-gg_idealRho = ggplot(df,aes(log10(nUMIs),log10(est),colour=Species)) +
-  geom_point() + 
-  geom_line() + 
-  #geom_errorbar(aes(ymin=log10(lower),ymax=log10(upper))) + 
-  ylab('log10(Contamination Fraction)') + 
-  xlab('log10(nUMIs)') +
-  scale_colour_manual(values=colPal[1:2]) +
-  guides(colour=FALSE) + 
-  theme_bw(base_size=18)
-pdf(file.path(plotDir,'IdealContaminationPlot.pdf'),width=7,height=7)
-plot(gg_idealRho)
-dev.off()
-png(file.path(plotDir,'IdealContaminationPlot.png'),width=7,height=7,units='in',res=rasterRes)
-plot(gg_idealRho)
-dev.off()
-
-
-####################################
-# Infering non-expressed gene plot #
-####################################
-genes = c('HBA1','HBA2','HBB','TPSAB1','TPSB2')
-gg = plotMarkerDistribution(scl,'Channel24',genes) +
-  ggtitle('pRCC_2')
-pdf(file.path(plotDir,'pRCC_bimodalGenes.pdf'),width=14,height=7)
-plot(gg)
-dev.off()
-png(file.path(plotDir,'pRCC_bimodalGenes.png'),width=14,height=7,units='in',res=rasterRes)
-plot(gg)
-dev.off()
-
-
-#######################################
-# Make a couple of showing off plots. #
-#######################################
-DR = as.data.frame(soggy@dr$tsne@cell.embeddings)
-colnames(DR) = c('RD1','RD2')
-pdf(file.path(plotDir,'ChangeInDistribution.pdf'),width=14)
-for(gene in c('LYZ','CD74','HLA-DRA','IL32','TRAC','CD3D','S100A9','S100A8','LTB','NKG7','GNLY','CD4','CD8A','HBB','TPSAB1')){
-  plot(plotChangeMap(scl,gene,DR,includePanels=c('Uncorrected','CorrectedCounts'))+ggtitle(gene))
+#Get complete set of old/new
+mMarks = bMarks
+m = match(with(gMarks,interaction(cluster,gene)),with(bMarks,interaction(cluster,gene)))
+mMarks = rbind(mMarks,gMarks[is.na(m),])
+mMarks = mMarks[,c('gene','cluster')]
+mMarks$oldFC = NA
+mMarks$newFC = NA
+mMarks$inOld = with(mMarks,interaction(cluster,gene)) %in% with(bMarks,interaction(cluster,gene))
+mMarks$inNew = with(mMarks,interaction(cluster,gene)) %in% with(gMarks,interaction(cluster,gene))
+#Get the logFC from stractch
+for(cl in unique(mMarks$cluster)){
+  w = which(mMarks$cluster==cl)
+  a = apply(dirty@assays$RNA@data[mMarks[w,'gene'],dirty@active.ident==cl],1,function(e) log(mean(expm1(e))+1))
+  b = apply(dirty@assays$RNA@data[mMarks[w,'gene'],dirty@active.ident!=cl],1,function(e) log(mean(expm1(e))+1))
+  mMarks$oldFC[w] = a-b
+  a = apply(cleaned@assays$RNA@data[mMarks[w,'gene'],cleaned@active.ident==cl],1,function(e) log(mean(expm1(e))+1))
+  b = apply(cleaned@assays$RNA@data[mMarks[w,'gene'],cleaned@active.ident!=cl],1,function(e) log(mean(expm1(e))+1))
+  mMarks$newFC[w] = a-b
 }
-dev.off()
-#A more reduced set, presented cleanly
-ggs = list()
-for(gene in c('HBB','HLA-DRA','S100A9','CD74','SAA1','SAA2','COL1A2','COL1A1','COL3A1')){
-  ggs[[gene]] = plotChangeMap(scl,gene,DR,includePanels=c('Uncorrected','CorrectedCounts'))
-  df = ggs[[gene]]$data
-  df$expressed = ifelse(df$data,'yes','no')
-  df$correction = factor(ifelse(df$correction=='Uncorrected','Contaminated','Cleaned'),
-                         levels=c('Contaminated','Cleaned'))
-  ggs[[gene]] = ggplot(df,aes(RD1,RD2)) + 
-    geom_point(aes(colour=expressed),size=0.3,alpha=1/2) +
-    scale_colour_manual(values=c('yes'='#e60000','no'='#808080')) +
-    guides(colour=FALSE) +
-    facet_grid(~correction) +
-    xlab('tSNE1') +
-    ylab('tSNE2') +
-    ggtitle(gene)
+tmp = mMarks[!is.na(mMarks$oldFC),]
+tmp = tmp[sign(tmp$newFC)==sign(tmp$oldFC),]
+tmp = tmp[abs(log(tmp$newFC/tmp$oldFC))<1,]
+x = tmp$oldFC
+y = tmp$newFC/tmp$oldFC
+doPlot = function(e){
+  layout(matrix(c(1,2),ncol=2),widths=c(10,1))
+  par(mar=c(5.1,4.1,4.1,0))
+  plot(x,y,
+       las=1,
+       type='n',
+       xlab='Uncorrected Fold Change',
+       ylab='CorrectedFC/UncorrectedFC',
+       frame.plot=FALSE)
+  col = c('#f7fbff','#deebf7','#c6dbef','#9ecae1','#6baed6','#4292c6','#2171b5','#08519c','#08306b')
+  hb = addHexbin(x,y,colSet=c(grey(0.95),grey(0)),xbins=100,logCounts=TRUE,maxCnts=2000)
+  abline(h=1,col='black',lty=3)
+  #Add special ones as points
+  #w = which(xor(tmp$inOld,tmp$inNew))
+  #points(x[w],y[w],
+  #     col=ifelse(tmp$inOld[w],'red','green'),
+  #     pch=19,
+  #     cex=0.2)
+  addColorBar('topright',col=hb$col,breaks=hb$breaks,ticks=0:3,title='log10(counts)')
+  #Add right plot giving density
+  par(mar=c(5.1,0,4.1,0))
+  den = density(tmp$newFC/tmp$oldFC)
+  plot(den$y,den$x,type='n',
+       frame.plot=FALSE,
+       xaxt='n',
+       yaxt='n',
+       xlab='Frequency',
+       ylab='',
+  xpd=NA)
+  lines(den$y,den$x,col='black')
+  polygon(c(0,den$y,0),c(0,den$x,0),col=grey(0.8,alpha=0.6))
+  abline(h=1,col='black',lty=3)
 }
-pdf(file.path(plotDir,'ChangeInDistributionKey.pdf'),width=28,height=28)
-plot_grid(ggs[[1]],ggs[[2]],ggs[[3]],ggs[[4]],nrow=2,ncol=2)
-dev.off()
-png(file.path(plotDir,'ChangeInDistributionKey.png'),width=28,height=28,units='in',res=rasterRes)
-plot_grid(ggs[[1]],ggs[[2]],ggs[[3]],ggs[[4]],nrow=2,ncol=2)
-dev.off()
-pdf(file.path(plotDir,'SAA1_correction.pdf'),width=14,height=7)
-plot(ggs[['SAA1']])
-dev.off()
-png(file.path(plotDir,'SAA1_correction.png'),width=14,height=7,units='in',res=rasterRes)
-plot(ggs[['SAA1']])
-dev.off()
-pdf(file.path(plotDir,'SAA2_correction.pdf'),width=14,height=7)
-plot(ggs[['SAA2']])
-dev.off()
-png(file.path(plotDir,'SAA2_correction.png'),width=14,height=7,units='in',res=rasterRes)
-plot(ggs[['SAA2']])
-dev.off()
-pdf(file.path(plotDir,'COL1A2_correction.pdf'),width=14,height=7)
-plot(ggs[['COL1A2']])
-dev.off()
-png(file.path(plotDir,'COL1A2_correction.png'),width=14,height=7,units='in',res=rasterRes)
-plot(ggs[['COL1A2']])
-dev.off()
-pdf(file.path(plotDir,'COL1A1_correction.pdf'),width=14,height=7)
-plot(ggs[['COL1A1']])
-dev.off()
-png(file.path(plotDir,'COL1A1_correction.png'),width=14,height=7,units='in',res=rasterRes)
-plot(ggs[['COL1A1']])
-dev.off()
-pdf(file.path(plotDir,'COL3A1_correction.pdf'),width=14,height=7)
-plot(ggs[['COL3A1']])
-dev.off()
-png(file.path(plotDir,'COL3A1_correction.png'),width=14,height=7,units='in',res=rasterRes)
-plot(ggs[['COL3A1']])
-dev.off()
+makePlots(file.path(plotDir,'Tumour_foldChange'),doPlot,splitRaster=FALSE,width=5,height=3.5,pointsize=8)
+########################
+# MarkerMap for Example
+tgts=c('SAA1','COL1A1','SAA2','HBB','S100A9')
+for(tgt in tgts){
+  df = list()
+  for(i in seq_along(scTum)){
+    tmp = cleaned@assays$RNA@counts[,grep(cMani$Label[i],colnames(cleaned))]
+    colnames(tmp) = gsub('.*___','',colnames(tmp))
+    #Get gene in old and new
+    old = scTum[[i]]$toc[tgt,]
+    new = tmp[tgt,]
+    relChange = (old-new)/old
+    df[[i]] = plotChangeMap(scTum[[i]],tmp,tgt,logData=FALSE)
+    df[[i]]$data$relChange = relChange
+    #x = df[[i]]$data[!is.na(relChange),]
+  }
+  df = lapply(seq_along(df),function(i) {e=df[[i]]$data;rownames(e) = paste0(cMani$Label[i],'___',rownames(e));e})
+  df = do.call(rbind,df)
+  #Update UMAP coordinates
+  m = match(rownames(df),colnames(dirty))
+  df$RD1 = dirty@reductions$tsne@cell.embeddings[m,1]
+  df$RD2 = dirty@reductions$tsne@cell.embeddings[m,2]
+  #Order
+  df = df[order(!is.na(df$relChange)),]
+  doPlot = function(e){
+    plot(df$RD1,df$RD2,
+         type='n',
+         frame.plot=FALSE,
+         xlab='tSNE1',
+         ylab='tSNE2')
+    col = c('#fff5eb','#fee6ce','#fdd0a2','#fdae6b','#fd8d3c','#f16913','#d94801','#a63603','#7f2704')
+    #col = c(grey(0.95),'black')
+    cc = circlize::colorRamp2(seq(0,1,length.out=length(col)),col)#,transparency = 0.2)
+    #Do as in the earlier panel
+    w = is.na(df$relChange)
+    points(df$RD1[w],df$RD2[w],cex=0.01,pch=19,col=grey(0.8))
+    points(df$RD1[!w],df$RD2[!w],
+           col=colAlpha(cc(df$relChange[!w]),1.0),
+           #col='black',
+           pch=19,
+           #lwd=0.1,
+           cex=0.3)
+    #addColorBar('topleft',col=col,breaks=c(1,0),ticks=5)
+  }
+  makePlots(file.path(plotDir,sprintf('Tumour_change_%s',tgt)),doPlot,splitRaster=FALSE,width=4.5,height=4.5,pointsize=8)
+  #Truncate to prevent -Inf -> NA coloured dots
+  #df$relChange[which(df$relChange< -2)] = -2
+  #df$relChange[which(df$relChange>0)] = 0
+  #df$relChange = 10**df$relChange
+  #Make plot
+  ###makePlot = function(){
+  ###  heatCols = c('#fff5eb','#fee6ce','#fdd0a2','#fdae6b','#fd8d3c','#f16913','#d94801','#a63603','#7f2704')
+  ###  cc = circlize::colorRamp2(seq(min(df$relChange,na.rm=TRUE),max(df$relChange,na.rm=TRUE),length.out=length(heatCols)),heatCols)
+  ###  df = df[order(!is.na(df$relChange),df$relChange),]
+  ###  par(mar=c(5,4,4,2+2)+0.1)
+  ###  plot(df$RD1,df$RD2,
+  ###       frame.plot=FALSE,
+  ###       col = ifelse(is.na(df$relChange),'grey',cc(df$relChange)),
+  ###       xlab='ReducedDim1',
+  ###       ylab='ReducedDim2',
+  ###       pch=19,
+  ###       cex=0.1)
+  ###  nBlocks = 101
+  ###  nTicks = 5 
+  ###  xx = seq(0,-2,length.out=nBlocks)
+  ###  labs = rep(NA,length(xx))
+  ###  w = round(seq(1,nBlocks,length.out=nTicks))
+  ###  labs[w] = as.character(round(xx[w],2))
+  ###  tmp = legend(x=max(df$RD1),
+  ###               y=mean(range(df$RD2)),
+  ###               legend=labs, #Tick markers
+  ###               fill=cc(xx), #Fill blocks
+  ###               border=NA, #With no border
+  ###               y.intersp=0.1, #Bunch up blocks to make continuousish
+  ###               adj = c(0.4,0.5),#Move text closer to bar
+  ###               cex=0.6, #Size of text
+  ###               xjust=0, #To right of max
+  ###               yjust=0.5, #Center around y location
+  ###               bty='n', #No border
+  ###               xpd=TRUE #Stick outside plot area
+  ###  )
+  ###  #Add the title
+  ###  text(tmp$rect$left+0.5*tmp$rect$w, #In the middle of the bar in x-direction
+  ###        tmp$rect$top,
+  ###        adj = c(0.5,-1), #Move up a bit
+  ###        labels='log10(RelChange)',
+  ###        xpd=TRUE #Don't clip
+  ###  )
+  ###}
+  ###gg = ggplot(df,aes(RD1,RD2)) +
+  ###  geom_point(aes(col=10**relChange),size=0.1) +
+  ###  xlab('ReducedDim1') +
+  ###  ylab('ReducedDim2') +
+  ###  labs(colour='log10(relChange)') + 
+  ###  ggtitle(sprintf('Change in expression of %s',tgt))
+  ###gg = gg + scale_colour_gradientn(colours=c('#fff5eb','#fee6ce','#fdd0a2','#fdae6b','#fd8d3c','#f16913','#d94801','#a63603','#7f2704'))
+  ###pdf(file.path(plotDir,sprintf('Tumour_example%s.pdf',tgt)),width=10)
+  ###plot(gg)
+  ####makePlot()
+  ###dev.off()
+  ###png(file.path(plotDir,sprintf('Tumour_example%s.png',tgt)),width=10,height=7,units='in',res=rasterRes)
+  ###plot(gg)
+  ####makePlot()
+  ###dev.off()
+}
+#################################################################
+# Calculate the shannon entropy before and after changes locally
+#How many random bootstraps
+nBoots = 250
+#How many cells from each batch
+nCells = 100
+nNgbs = 100
+#Find neighbours
+tgtObjs = list('uncorrected'=dirty,'corrected'=cleaned)
+tgtObjs = lapply(tgtObjs,FindNeighbors,k.param=nNgbs)
+cellIDs = rownames(tgtObjs[[1]]@meta.data)
+batch = gsub('_[0-9]$','',gsub('___.*','',rownames(tgtObjs[[1]]@meta.data)))
+out = matrix(0,nrow=nBoots,ncol=2)
+pb = txtProgressBar(max=nBoots)
+for(ii in seq(nBoots)){
+  setTxtProgressBar(pb,ii)
+  #Pick random cells
+  tgtCells = unlist(lapply(split(cellIDs,batch),sample,nCells))
+  jj=0
+  for(srat in list(dirty,cleaned)){
+    jj = jj + 1
+    #Get the neighbours
+    cNgbs = as.matrix(srat@graphs$RNA_nn[tgtCells,]>0)
+    ent = 0
+    kk=0
+    for(tgtCell in tgtCells){
+      kk = kk +1
+      #cNgbs = which(srat@graphs$RNA_nn[tgtCell,]>0)
+      #Get batch frequencies
+      lCnts = table(batch[which(cNgbs[kk,])])
+      lFreq = lCnts/sum(lCnts)
+      ent = ent - sum(lFreq *log(lFreq))
+    }
+    out[ii,jj] = ent
+  }
+}
+close(pb)
+##Make a nice beehive plot of the results
+doPlot = function(e){
+  #plot(0,0,
+  #     type='n',
+  #     xaxt='n',
+  #     xlim = c(0.42,2.58),
+  #     ylim = c(min(out)-12,max(out)+12),
+  #     xlab='',
+  #     ylab='Batch Entropy',
+  #     frame.plot=FALSE)
+  #axis(1,at=c(1,2),labels=c('Uncorrected','Corrected'))
+  #beeswarm(list(Uncorrected=out[,1],Corrected=out[,2]),
+  #         cex=0.2,
+  #         pch=19,
+  #         col=grey(c(0,0.6)),
+  #         spacing=3,
+  #         add=FALSE)
+  #Stop making things more complicated,  just do the same as the others
+  plot(0,0,
+       xlim = c(0.5,2.5),
+       ylim = range(out),
+       las=1,
+       type='n',
+       xaxt='n', 
+       xlab='',
+       ylab='Batch Entropy',
+       frame.plot=FALSE
+       )
+  axis(1,at=c(1,2),labels=c('Uncorrected','Corrected'))
+  #Define the plots
+  #Within species
+  #10X
+  sets = list(list(cs='Uncorrected',tn=1,col=grey(0),mid=1.0),
+              list(cs='Uncorrected',tn=2,col=grey(0),mid=2.0))
+  for(set in sets){
+    x = out[,set$tn]
+    points(set$mid+ runif(length(x),-.25,.25),
+           x,
+           col=colAlpha(set$col,0.5),
+           pch=19,
+           cex=0.1
+    )
+    boxplot(x,
+            col=NA,
+            at=set$mid,
+            boxwex=1.0,
+            border=set$col,
+            outline=FALSE,
+            add=TRUE,
+            xaxt='n', 
+            yaxt='n', 
+            bty='n',
+            frame.plot=FALSE
+    )
+  }
+}
+makePlots(file.path(plotDir,'Tumour_entropy'),doPlot,splitRaster=FALSE,width=3,height=4.0,pointsize=8)
+##########################################
+# Example showing that HB genes work well
+i=16
+ute = estimateNonExpressingCells(scTum[[i]],nonExpressedGeneList = geneList[tgtSet])
+gg = plotMarkerMap(scTum[[i]],geneSet=geneList[[tgtSet]],useToEst=ute)
+#df = scTum[[i]]$metaData
+##First plot the clustering
+#makePlot = function(){
+#  plot(df$tSNE1,df$tSNE2,
+#       frame.plot=FALSE,
+#       col = colPalLarge[as.numeric(df$clusters) %% length(colPalLarge) +1],
+#       pch=19,
+#       cex=0.3,
+#       xlab='tSNE1',
+#       ylab='tSNE2'
+#       )
+#  mids = aggregate(cbind(tSNE1,tSNE2) ~ clusters,data=df,FUN=mean)
+#  text(mids$tSNE1,mids$tSNE2,
+#       labels=mids$clusters,
+#       cex=1.5
+#       )
+#}
+doPlot = function(e) plot(gg)
+makePlots(file.path(plotDir,'Tumour_egHB'),doPlot,splitRaster=FALSE,width=7,height=7,pointsize=8)
 
+
+#########
+# Other #
+#########
+#####################################
+# Calculate correlation coef for all
+getCor = function(sc){
+  spFrac = sc$soupProfile$counts
+  clFrac = rowSums(sc$toc)
+  #Drop the extreme genes
+  w = which(spFrac>quantile(spFrac,0.99) | clFrac > quantile(clFrac,0.99))
+  spFrac = spFrac[-w]
+  clFrac = clFrac[-w]
+  #Sub-sample to match
+  rat = sum(spFrac)/sum(clFrac)
+  clFrac = rbinom(length(clFrac),clFrac,rat)
+  cc = cor(spFrac,clFrac)
+  return(cc)
+}
+#Apply it to everything
+ccs = c(sapply(scMixes,getCor),getCor(scPBMC),sapply(scTum,getCor))
+
+
+#' Automatically calculate the contamination fraction
+#'
+#' The idea of this method is that genes that are highly expressed in the soup and be marker genes for some population can be used to estimate the background.  Marker genes are identified using the tfidf method (see \code{\link{quickMarkers}}).  The contamination fraction is then calculated at the cluster level for each of these genes and clusters are then aggressively pruned to remove those that give implausible estimates.  A final estimate is based on the average across these estimates, under the assumption that biased estimates will not cluster, while true ones will (around the true value).
+#'
+#' Note that the interpretation of the tf-idf cut-off in this context is that a cut-off t implies that a marker gene has the property that geneFreqGlobal < exp(-t/geneFreqInClust).
+#'
+#' @param sc The SoupChannel object.
+#' @param nMarks How many marker genes to use. These must also pass the tfidf cut-off and be highly expressed in the soup, so there may end up being fewer than this number.
+#' @param tfidfMin Minimum value of tfidf to accept for a marker gene.
+#' @param soupMin Minimum value of expression in the background to accept for marker.
+#' @param rhoMax
+#' @param FDR
+#' @param clustPerGene
+#' @param maxClustFrac
+#' @param minCnts
+autoCont = function(sc,nMarks = 50,tfidfMin=0.8,soupMin=1e-4,rhoMax=0.5,FDR=0.1,clustPerGene=1,maxClustFrac=0.5,minCnts=1){
+  #First collapse by cluster
+  s = split(rownames(sc$metaData),sc$metaData$clusters)
+  tmp = do.call(cbind,lapply(s,function(e) rowSums(sc$toc[,e,drop=FALSE])))
+  ssc = sc 
+  ssc$toc = tmp
+  ssc$metaData = data.frame(nUMIs = colSums(tmp),row.names=colnames(tmp))
+  ###################
+  # Get best markers
+  #Get the top N soup Genes
+  tgts = ssc$soupProfile[order(ssc$soupProfile$est,decreasing=TRUE),]
+  tgts = rownames(tgts)[tgts$est>soupMin]
+  #Refine this to the best markers we can manage
+  mrks = quickMarkers(sc$toc,sc$metaData$clusters,N=Inf)
+  #Keep only the ones that are high in soup
+  mrks = mrks[mrks$gene %in% tgts,]
+  #And only the most specific entry for each gene
+  mrks = mrks[order(mrks$gene,-mrks$tfidf),]
+  mrks = mrks[!duplicated(mrks$gene),]
+  #Order by tfidif maxness
+  mrks = mrks[order(-mrks$tfidf),]
+  #Apply tf-idf cut-off
+  mrks = mrks[mrks$tfidf > tfidfMin,]
+  tgts = head(mrks$gene,nMarks)
+  ############################
+  # Get estimates in clusters
+  #Get which ones we'd use and where with canonical method
+  tmp = as.list(tgts)
+  names(tmp) = tgts
+  ute = estimateNonExpressingCells(sc,tmp,maximumContamination=rhoMax,FDR=FDR)
+  m = rownames(sc$metaData)[match(rownames(ssc$metaData),sc$metaData$clusters)]
+  ute = t(ute[m,])
+  colnames(ute) = rownames(ssc$metaData)
+  #Now calculate the observed and expected counts for each cluster for 
+  expCnts = outer(ssc$soupProfile$est,ssc$metaData$nUMIs)
+  rownames(expCnts) = rownames(ssc$soupProfile)
+  colnames(expCnts) = rownames(ssc$metaData)
+  expCnts = expCnts[tgts,]
+  #And the observed ones
+  obsCnts = ssc$toc[tgts,]
+  #Filter out the shite
+  #Get the p-value for this being less than 1
+  pp = ppois(obsCnts,expCnts*rhoMax,lower.tail=TRUE)
+  qq = p.adjust(pp,method='BH')
+  qq = matrix(qq,nrow=nrow(pp),ncol=ncol(pp),dimnames=dimnames(pp))
+  #Get the cluster level ratio
+  rhos = obsCnts/expCnts
+  #Index in range
+  rhoIdx = t(apply(rhos,1,function(e) order(order(e))))
+  #Make a data.frame with everything
+  dd = data.frame(gene = rep(rownames(ute),ncol(ute)),
+                  passNonExp = as.vector(ute),
+                  rho = as.vector(rhos),
+                  rhoIdx = as.vector(rhoIdx),
+                  obsCnt = as.vector(obsCnts),
+                  expCnt = as.vector(expCnts),
+                  qVal = as.vector(qq)
+                  )
+  dd$pass = dd$obsCnt >= minCnts & 
+    dd$qVal < FDR & 
+    dd$rhoIdx <= min(clustPerGene,floor(ncol(rhoIdx)*maxClustFrac)) & 
+    dd$passNonExp
+  #I think the best way to do this is based on the density.
+  tmp = density(dd$rho[dd$pass])
+  dd$rhoEst = tmp$x[which.max(tmp$y)]
+  return(dd)
+}
